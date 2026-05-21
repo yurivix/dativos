@@ -10,6 +10,14 @@ venv/
 data/raw/
 data/*.xlsx
 
+# Sensitive: salt and the full-name database NEVER go to the repo
+data/salt.txt
+data/dativos_full.duckdb
+data/dativos_full.duckdb.wal
+
+# Legacy SQLite from v1 — superseded by dativos_anon.duckdb
+data/dativos.db
+
 # OS / IDE
 .DS_Store
 .idea/

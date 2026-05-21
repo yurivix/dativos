@@ -2,8 +2,9 @@ name: refresh-data
 
 on:
   schedule:
-    # Mondays at 06:00 UTC (03:00 BRT)
-    - cron: "0 6 * * 1"
+    # Daily at 06:00 UTC (03:00 BRT) — the current-year file is updated
+    # roughly monthly by SEFAZ, but we check daily to keep latency low.
+    - cron: "0 6 * * *"
   workflow_dispatch:
 
 permissions:
@@ -23,8 +24,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run ETL
-        run: python -m etl
+      - name: Run ETL (anon DB only — no real names in CI artifacts)
+        env:
+          DATIVOS_SALT: ${{ secrets.DATIVOS_SALT }}
+          DATIVOS_NO_FULL_DB: "1"
+        run: |
+          if [ -z "$DATIVOS_SALT" ]; then
+            echo "::error::DATIVOS_SALT secret is not set. Configure it in repo settings."
+            exit 1
+          fi
+          python -m etl
 
       - name: Run tests
         run: python -m pytest -q
@@ -33,10 +42,10 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/dativos.db
+          git add data/dativos_anon.duckdb
           if git diff --cached --quiet; then
             echo "No data changes."
           else
-            git commit -m "data: weekly refresh of dativos.db"
+            git commit -m "data: refresh dativos_anon.duckdb"
             git push
           fi

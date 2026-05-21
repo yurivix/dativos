@@ -5,7 +5,7 @@ These cases all came from real rows in transparencia-ativa-dativos-pge*.xlsx.
 """
 from datetime import date
 
-from etl.parse import parse_period
+from etl.ckan.parse import parse_period
 
 
 def test_canonical_form():
