@@ -17,9 +17,26 @@ import streamlit as st
 from analysis import distortions as dist
 
 ROOT = Path(__file__).resolve().parent
-# DATIVOS_DB env var lets app_private.py point this at the full DB without
-# duplicating the dashboard code. Defaults to the public anonymized DB.
-DB_PATH = Path(os.environ.get("DATIVOS_DB", ROOT / "data" / "dativos_anon.duckdb"))
+
+
+def _resolve_db_path() -> Path:
+    """Pick which DuckDB file to read.
+
+    Resolution order:
+      1. DATIVOS_DB env var (explicit override)
+      2. dativos_full.duckdb if present (i.e. running locally with names)
+      3. dativos_anon.duckdb (the only one shipped in the repo / on deploy)
+    """
+    env = os.environ.get("DATIVOS_DB")
+    if env:
+        return Path(env)
+    full = ROOT / "data" / "dativos_full.duckdb"
+    if full.exists():
+        return full
+    return ROOT / "data" / "dativos_anon.duckdb"
+
+
+DB_PATH = _resolve_db_path()
 
 st.set_page_config(
     page_title="Dativos ES — BIZÃO",

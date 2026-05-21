@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Iterable
 
 import duckdb
+import pandas as pd
 
 from .anonymize import AdvogadoIdentity, normalize_name
 from .ckan.parse import Row as CkanRow
@@ -117,6 +118,98 @@ def write_databases(
     if full_path is not None:
         targets.append((full_path, "full"))
 
+    # Materialize the bulk frames ONCE — pandas → DuckDB bulk INSERT is
+    # ~100× faster than executemany with tuple lists.
+    pagamentos_df = pd.DataFrame(
+        [
+            {
+                "advogado_id": identities[(normalize_name(p.nome), p.cpf_mascarado)].advogado_id,
+                "processo": p.processo,
+                "valor_bruto": p.valor_bruto,
+                "valor_liquido": p.valor_liquido,
+                "valor_irrf": p.valor_irrf,
+                "valor_inss": p.valor_inss,
+                "comarca": p.comarca,
+                "vara": p.vara,
+                "vara_nome": p.vara_nome,
+                "conta_judicial": p.conta_judicial,
+                "ano": p.ano,
+                "mes_pagamento": p.mes_pagamento,
+                "competencia": f"{p.ano:04d}-{p.mes_pagamento:02d}-01",
+                "source_download_id": p.source_download_id,
+                "imported_at": now,
+            }
+            for p in payments
+        ]
+    )
+    pagamentos_df["competencia"] = pd.to_datetime(pagamentos_df["competencia"])
+    pagamentos_df["imported_at"] = pd.to_datetime(pagamentos_df["imported_at"])
+
+    advogados_full_df = pd.DataFrame(
+        [
+            {
+                "advogado_id": i.advogado_id,
+                "nome": i.nome,
+                "nome_normalizado": i.nome_normalizado,
+                "cpf_mascarado": i.cpf_mascarado,
+            }
+            for i in identities.values()
+        ]
+    )
+    advogados_anon_df = advogados_full_df[["advogado_id", "cpf_mascarado"]].copy()
+
+    agregado_rows = [
+        {
+            "period_start": ckan_row.period_start,
+            "period_end": ckan_row.period_end,
+            "mes_referencia": ckan_row.mes_referencia,
+            "period_label": ckan_row.period_label,
+            "n_solicitacoes": ckan_row.n_solicitacoes,
+            "n_analises": ckan_row.n_analises,
+            "valor_bruto": ckan_row.valor_bruto,
+            "source_resource_id": src_id,
+            "source_resource_modified": modified,
+            "imported_at": now,
+        }
+        for (ckan_row, src_id, modified) in ckan_payload["rows"]
+    ]
+    agregado_df = pd.DataFrame(agregado_rows)
+    if not agregado_df.empty:
+        agregado_df["period_start"] = pd.to_datetime(agregado_df["period_start"])
+        agregado_df["period_end"] = pd.to_datetime(agregado_df["period_end"])
+        agregado_df["imported_at"] = pd.to_datetime(agregado_df["imported_at"])
+
+    sources_rows = []
+    for s in ckan_payload["sources"]:
+        sources_rows.append(
+            {
+                "source_kind": "ckan",
+                "source_id": s["resource_id"],
+                "label": s.get("resource_name"),
+                "url": s["url"],
+                "file_sha256": s.get("file_sha256"),
+                "last_modified": s.get("last_modified"),
+                "rows_loaded": None,
+                "imported_at": now,
+            }
+        )
+    for t in transparencia_sources:
+        sources_rows.append(
+            {
+                "source_kind": "transparencia",
+                "source_id": str(t["download_id"]),
+                "label": t.get("label"),
+                "url": t.get("url"),
+                "file_sha256": t.get("file_sha256"),
+                "last_modified": t.get("last_modified"),
+                "rows_loaded": t.get("rows_loaded"),
+                "imported_at": now,
+            }
+        )
+    sources_df = pd.DataFrame(sources_rows)
+    if not sources_df.empty:
+        sources_df["imported_at"] = pd.to_datetime(sources_df["imported_at"])
+
     for path, kind in targets:
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
@@ -125,119 +218,21 @@ def write_databases(
         try:
             _init_schema(con, kind)
 
-            # advogados
-            if kind == "full":
-                con.executemany(
-                    "INSERT INTO advogados (advogado_id, nome, nome_normalizado, cpf_mascarado) VALUES (?, ?, ?, ?)",
-                    [
-                        (i.advogado_id, i.nome, i.nome_normalizado, i.cpf_mascarado)
-                        for i in identities.values()
-                    ],
-                )
-            else:
-                # anon DB: keep only id + masked CPF (which is already non-PII)
-                con.executemany(
-                    "INSERT INTO advogados (advogado_id, cpf_mascarado) VALUES (?, ?)",
-                    [
-                        (i.advogado_id, i.cpf_mascarado)
-                        for i in identities.values()
-                    ],
-                )
+            # Bulk-insert via DataFrame: DuckDB sees `df` as a virtual table
+            # in the local scope and copies it in C++.
+            df_adv = advogados_full_df if kind == "full" else advogados_anon_df  # noqa: F841
+            con.execute("INSERT INTO advogados SELECT * FROM df_adv")
 
-            # pagamentos — same in both DBs, identified only by advogado_id
-            payment_rows = []
-            for p in payments:
-                ident = identities[(normalize_name(p.nome), p.cpf_mascarado)]
-                competencia = f"{p.ano:04d}-{p.mes_pagamento:02d}-01"
-                payment_rows.append(
-                    (
-                        ident.advogado_id,
-                        p.processo,
-                        p.valor_bruto,
-                        p.valor_liquido,
-                        p.valor_irrf,
-                        p.valor_inss,
-                        p.comarca,
-                        p.vara,
-                        p.vara_nome,
-                        p.conta_judicial,
-                        p.ano,
-                        p.mes_pagamento,
-                        competencia,
-                        p.source_download_id,
-                        now,
-                    )
-                )
-            con.executemany(
-                """
-                INSERT INTO pagamentos
-                (advogado_id, processo, valor_bruto, valor_liquido, valor_irrf, valor_inss,
-                 comarca, vara, vara_nome, conta_judicial, ano, mes_pagamento, competencia,
-                 source_download_id, imported_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                payment_rows,
-            )
+            df_pag = pagamentos_df  # noqa: F841
+            con.execute("INSERT INTO pagamentos SELECT * FROM df_pag")
 
-            # CKAN aggregates
-            for row_tuple in ckan_payload["rows"]:
-                ckan_row, src_id, modified = row_tuple
-                con.execute(
-                    """
-                    INSERT OR REPLACE INTO agregado_oficial
-                    (period_start, period_end, mes_referencia, period_label,
-                     n_solicitacoes, n_analises, valor_bruto,
-                     source_resource_id, source_resource_modified, imported_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        ckan_row.period_start.isoformat(),
-                        ckan_row.period_end.isoformat(),
-                        ckan_row.mes_referencia,
-                        ckan_row.period_label,
-                        ckan_row.n_solicitacoes,
-                        ckan_row.n_analises,
-                        ckan_row.valor_bruto,
-                        src_id,
-                        modified,
-                        now,
-                    ),
-                )
+            if not agregado_df.empty:
+                df_agg = agregado_df  # noqa: F841
+                con.execute("INSERT INTO agregado_oficial SELECT * FROM df_agg")
 
-            # sources lineage
-            for s in ckan_payload["sources"]:
-                con.execute(
-                    """
-                    INSERT OR REPLACE INTO sources
-                    (source_kind, source_id, label, url, file_sha256, last_modified, rows_loaded, imported_at)
-                    VALUES ('ckan', ?, ?, ?, ?, ?, NULL, ?)
-                    """,
-                    (
-                        s["resource_id"],
-                        s.get("resource_name"),
-                        s["url"],
-                        s.get("file_sha256"),
-                        s.get("last_modified"),
-                        now,
-                    ),
-                )
-            for t in transparencia_sources:
-                con.execute(
-                    """
-                    INSERT OR REPLACE INTO sources
-                    (source_kind, source_id, label, url, file_sha256, last_modified, rows_loaded, imported_at)
-                    VALUES ('transparencia', ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        str(t["download_id"]),
-                        t.get("label"),
-                        t.get("url"),
-                        t.get("file_sha256"),
-                        t.get("last_modified"),
-                        t.get("rows_loaded"),
-                        now,
-                    ),
-                )
+            if not sources_df.empty:
+                df_src = sources_df  # noqa: F841
+                con.execute("INSERT INTO sources SELECT * FROM df_src")
         finally:
             con.close()
         summary[kind] = str(path)

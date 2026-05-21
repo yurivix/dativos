@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import date
 from pathlib import Path
 
 # Windows consoles default to cp1252 and choke on accented names.
@@ -35,10 +36,19 @@ def extract_year(label: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def run(build_full_db: bool = True) -> int:
+def run(build_full_db: bool = True, force_redownload: bool = False) -> int:
+    """End-to-end ETL.
+
+    Past-year XLSX files are immutable in practice; we keep them cached in
+    `data/raw/` and skip the network call. Only the current year is always
+    re-downloaded. Override with `force_redownload=True` (or DATIVOS_FORCE=1).
+    """
+    current_year = date.today().year
+    force = force_redownload or os.environ.get("DATIVOS_FORCE", "").lower() in {"1", "true", "yes"}
+
     print("[etl] === transparencia.es.gov.br ===")
     files = [f for f in discover_files() if is_data_xlsx(f)]
-    print(f"[etl] discovered {len(files)} data files")
+    print(f"[etl] discovered {len(files)} data files (current_year={current_year})")
     files.sort(key=lambda f: extract_year(f.label) or 0)
 
     all_payments: list[Payment] = []
@@ -48,11 +58,22 @@ def run(build_full_db: bool = True) -> int:
         if ano is None:
             print(f"[etl] WARN: cannot infer year from {f.label!r}; skipping")
             continue
-        print(f"[etl] downloading id={f.download_id} year={ano} ({f.label})")
-        path = download_file(f, RAW_DIR)
+
+        cached = RAW_DIR / f"transparencia_{f.download_id}.xlsx"
+        is_current = (ano == current_year)
+        use_cache = cached.exists() and cached.stat().st_size > 0 and not is_current and not force
+
+        if use_cache:
+            path = cached
+            print(f"[etl] cache hit id={f.download_id} year={ano} ({cached.name})")
+        else:
+            why = "current year" if is_current else ("forced" if force else "no cache")
+            print(f"[etl] downloading id={f.download_id} year={ano} [{why}]")
+            path = download_file(f, RAW_DIR)
+
         sha = file_sha256(path)
         rows = list(parse_xlsx(path, ano=ano, download_id=f.download_id))
-        print(f"[etl]   parsed {len(rows):>6} payments")
+        print(f"[etl]   parsed {len(rows):>6} payments  sha256={sha[:12]}")
         all_payments.extend(rows)
         transparencia_sources.append(
             {
