@@ -1,0 +1,6 @@
+streamlit>=1.32
+pandas>=2.2
+openpyxl>=3.1
+requests>=2.31
+altair>=5.2
+pyyaml>=6.0
