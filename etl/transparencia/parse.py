@@ -49,11 +49,31 @@ HEADER_ALIASES = {
 }
 
 
+# CNJ pattern: NNNNNNN-DD.AAAA.J.TR.OOOO — the AAAA group is the year of distribution.
+CNJ_YEAR_RE = re.compile(r"\d{7}-\d{2}\.(\d{4})\.\d\.\d{2}\.\d{4}")
+
+
+def extract_ano_processo(processo: str | None) -> int | None:
+    """Extract the distribution year from a CNJ-formatted process number.
+
+    Returns None for non-CNJ formats (older processes published before
+    Resolução 65/2009 may not follow the standard).
+    """
+    if not processo:
+        return None
+    m = CNJ_YEAR_RE.search(processo)
+    if not m:
+        return None
+    year = int(m.group(1))
+    return year if 1980 <= year <= 2100 else None
+
+
 @dataclass(frozen=True)
 class Payment:
     nome: str
     cpf_mascarado: str | None
     processo: str
+    ano_processo: int | None
     valor_liquido: float | None
     valor_bruto: float
     valor_irrf: float | None
@@ -163,10 +183,12 @@ def parse_xlsx(path: Path, ano: int, download_id: int) -> Iterator[Payment]:
                 if mes is None:
                     continue
 
+                processo_clean = processo.strip()
                 yield Payment(
                     nome=nome.strip(),
                     cpf_mascarado=_str_or_none(fields.get("cpf")),
-                    processo=processo.strip(),
+                    processo=processo_clean,
+                    ano_processo=extract_ano_processo(processo_clean),
                     valor_liquido=_to_float(fields.get("valor_liquido")),
                     valor_bruto=valor_bruto,
                     valor_irrf=_to_float(fields.get("valor_irrf")),

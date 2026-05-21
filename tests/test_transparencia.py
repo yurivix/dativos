@@ -1,6 +1,6 @@
 """Tests for the transparencia parser + anonymization."""
 from etl.anonymize import normalize_name, pseudonym
-from etl.transparencia.parse import HEADER_ALIASES, _norm
+from etl.transparencia.parse import HEADER_ALIASES, _norm, extract_ano_processo
 
 
 def test_norm_strips_accents_and_punct():
@@ -46,3 +46,31 @@ def test_pseudonym_distinguishes_different_cpf():
     a = pseudonym("João Silva", "***123456**", s)
     b = pseudonym("João Silva", "***999999**", s)
     assert a != b
+
+
+# ── CNJ year extraction ─────────────────────────────────────────────────
+def test_cnj_year_canonical():
+    # observed: 0007704-92.2011.8.08.0030 → 2011
+    assert extract_ano_processo("0007704-92.2011.8.08.0030") == 2011
+    # 2025 PGE example
+    assert extract_ano_processo("5000385-59.2024.8.08.0053") == 2024
+
+
+def test_cnj_year_returns_none_for_non_cnj():
+    assert extract_ano_processo(None) is None
+    assert extract_ano_processo("") is None
+    assert extract_ano_processo("processo antigo 12345/2010") is None
+    assert extract_ano_processo("garbage") is None
+
+
+def test_cnj_year_handles_implausible_years():
+    # year < 1980 or > 2100 → None
+    assert extract_ano_processo("0007704-92.1850.8.08.0030") is None
+    assert extract_ano_processo("0007704-92.2300.8.08.0030") is None
+    # boundary 1980 valid
+    assert extract_ano_processo("0007704-92.1980.8.08.0030") == 1980
+
+
+def test_cnj_year_embedded_in_text():
+    # extraction should still work if there's surrounding text
+    assert extract_ano_processo("Proc 0007704-92.2015.8.08.0030 (extra)") == 2015

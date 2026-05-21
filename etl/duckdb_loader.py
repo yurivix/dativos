@@ -31,6 +31,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS pagamentos (
     advogado_id        VARCHAR NOT NULL,
     processo           VARCHAR NOT NULL,
+    ano_processo       INTEGER,
     valor_bruto        DOUBLE  NOT NULL,
     valor_liquido      DOUBLE,
     valor_irrf         DOUBLE,
@@ -93,6 +94,7 @@ INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_pag_adv ON pagamentos(advogado_id);
 CREATE INDEX IF NOT EXISTS idx_pag_ano ON pagamentos(ano, mes_pagamento);
 CREATE INDEX IF NOT EXISTS idx_pag_comarca ON pagamentos(comarca);
+CREATE INDEX IF NOT EXISTS idx_pag_ano_processo ON pagamentos(ano_processo);
 """
 
 
@@ -125,6 +127,7 @@ def write_databases(
             {
                 "advogado_id": identities[(normalize_name(p.nome), p.cpf_mascarado)].advogado_id,
                 "processo": p.processo,
+                "ano_processo": p.ano_processo,
                 "valor_bruto": p.valor_bruto,
                 "valor_liquido": p.valor_liquido,
                 "valor_irrf": p.valor_irrf,
