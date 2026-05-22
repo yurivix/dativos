@@ -81,9 +81,9 @@ def load_advogados_index() -> pd.DataFrame:
     """Cached advogados table (used for join + name search). Built once per session."""
     if PRIVATE:
         return get_conn().execute(
-            "SELECT advogado_id, nome, nome_normalizado, cpf_mascarado FROM advogados"
+            "SELECT advogado_id, nome, nome_normalizado, cpfs_vistos FROM advogados"
         ).df()
-    return get_conn().execute("SELECT advogado_id, cpf_mascarado FROM advogados").df()
+    return get_conn().execute("SELECT advogado_id, n_cpfs_vistos FROM advogados").df()
 
 
 def attach_name(df: pd.DataFrame, id_col: str = "advogado_id") -> pd.DataFrame:

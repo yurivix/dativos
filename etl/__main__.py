@@ -88,24 +88,38 @@ def run(build_full_db: bool = True, force_redownload: bool = False) -> int:
 
     print(f"[etl] total payments parsed: {len(all_payments):,}")
 
-    # Build identities map keyed by the *normalized* (nome, cpf) so that minor
-    # casing/whitespace differences in the source don't fork the same person
-    # into multiple ADV_ids.
+    # Build identities map keyed by nome_normalizado only. We accumulate every
+    # masked CPF observed in `cpfs_vistos` for auditability. See the docstring
+    # in etl/anonymize.py for why the masked CPF is not part of the key.
     salt = anon_mod.load_or_create_salt(SALT_PATH)
     print(f"[etl] salt loaded ({'env' if os.environ.get('DATIVOS_SALT') else 'file'})")
-    identities: dict[tuple[str, str | None], anon_mod.AdvogadoIdentity] = {}
+    identities: dict[str, anon_mod.AdvogadoIdentity] = {}
+    cpfs_by_id: dict[str, set[str]] = {}
     for p in all_payments:
-        key = (anon_mod.normalize_name(p.nome), p.cpf_mascarado)
-        if key in identities:
-            continue
-        adv_id = anon_mod.pseudonym(p.nome, p.cpf_mascarado, salt)
-        identities[key] = anon_mod.AdvogadoIdentity(
-            advogado_id=adv_id,
-            nome=p.nome,
-            nome_normalizado=key[0],
-            cpf_mascarado=p.cpf_mascarado,
+        key = anon_mod.normalize_name(p.nome)
+        if key not in identities:
+            adv_id = anon_mod.pseudonym(p.nome, None, salt)
+            identities[key] = anon_mod.AdvogadoIdentity(
+                advogado_id=adv_id,
+                nome=p.nome,
+                nome_normalizado=key,
+                cpfs_vistos=(),
+            )
+            cpfs_by_id[adv_id] = set()
+        if p.cpf_mascarado:
+            cpfs_by_id[identities[key].advogado_id].add(p.cpf_mascarado)
+    # Freeze cpfs_vistos as sorted tuples
+    for k, ident in list(identities.items()):
+        cpfs = tuple(sorted(cpfs_by_id[ident.advogado_id]))
+        identities[k] = anon_mod.AdvogadoIdentity(
+            advogado_id=ident.advogado_id,
+            nome=ident.nome,
+            nome_normalizado=ident.nome_normalizado,
+            cpfs_vistos=cpfs,
         )
-    print(f"[etl] identities: {len(identities):,} unique advogados")
+    multi_cpf = sum(1 for i in identities.values() if len(i.cpfs_vistos) > 1)
+    print(f"[etl] identities: {len(identities):,} unique advogados  "
+          f"({multi_cpf:,} com múltiplas máscaras de CPF)")
 
     print("[etl] === CKAN (reconciliation source) ===")
     ckan_payload = collect_ckan(RAW_DIR)

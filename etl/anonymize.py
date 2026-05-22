@@ -1,18 +1,22 @@
 """Deterministic pseudo-anonymization of advogado identities.
 
-The same (name + masked CPF) always maps to the same `ADV_xxxxxxxx` pseudonym
-across runs and across yearly files, as long as the salt is stable. The salt
-lives outside the repo (`data/salt.txt`, gitignored) and is exposed to the
-GitHub Actions workflow via the DATIVOS_SALT secret.
+The same `normalize_name(nome)` always maps to the same `ADV_xxxxxxxx`
+pseudonym across runs and yearly files, as long as the salt is stable.
 
-We map BOTH the normalized name AND the masked CPF together because:
-  - The same advogado often appears with name typos across files; (name+cpf)
-    keeps them merged.
-  - Different advogados sharing a first/last name will not collide as long as
-    their CPFs differ.
+**Why name-only, not (name + masked CPF):**
+The SEFAZ files publish the masked CPF in inconsistent formats across years:
+  - `***42351***`   (5 digits visible, old format)
+  - `***423517**`   (6 digits visible, newer)
+  - `***.423.5**`   (with dot punctuation, occasional)
+Same person, different masks → different (name+cpf) keys → different ADV_ids,
+which silently splits one lawyer's payments into multiple pseudonyms. We saw
+3,199 names duplicated in the base before fixing.
 
-The masked CPF the portal publishes (`***116817**`) is not reversible to the
-real CPF; we never store the real CPF anywhere.
+By keying on normalize_name alone we collapse those duplicates correctly.
+The trade-off is that genuine namesakes with different CPFs get merged —
+but in this corpus (≈11k names, mostly multi-token full names) collisions
+are rare. The `cpfs_vistos` array column in `advogados` keeps every masked
+CPF observed for auditing.
 """
 from __future__ import annotations
 
@@ -63,15 +67,19 @@ PSEUDONYM_HEX_LEN = 12  # ~2.8e14 buckets; collision probability with ~11k IDs i
 
 
 def pseudonym(nome: str, cpf_mascarado: str | None, salt: str) -> str:
-    """Compute the deterministic ADV_xxxxxxxxxxxx pseudonym."""
-    key = f"{normalize_name(nome)}|{cpf_mascarado or ''}|{salt}"
+    """Compute the deterministic ADV_xxxxxxxxxxxx pseudonym.
+
+    `cpf_mascarado` is accepted for backwards compatibility but **not used** —
+    see module docstring for why. Same nome → same ADV.
+    """
+    key = f"{normalize_name(nome)}|{salt}"
     h = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return f"ADV_{h[:PSEUDONYM_HEX_LEN]}"
 
 
 @dataclass(frozen=True)
 class AdvogadoIdentity:
-    advogado_id: str          # ADV_xxxxxxxx (the pseudonym)
+    advogado_id: str          # ADV_xxxxxxxxxxxx (the pseudonym)
     nome: str                 # real name (only persisted in the full DB)
     nome_normalizado: str     # for dedupe / search
-    cpf_mascarado: str | None
+    cpfs_vistos: tuple[str, ...] = ()  # all masked CPFs observed across files

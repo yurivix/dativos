@@ -79,14 +79,14 @@ CREATE TABLE IF NOT EXISTS advogados (
     advogado_id        VARCHAR PRIMARY KEY,
     nome               VARCHAR NOT NULL,
     nome_normalizado   VARCHAR NOT NULL,
-    cpf_mascarado      VARCHAR
+    cpfs_vistos        VARCHAR  -- '|'-separated list of masked CPFs
 );
 """
 
 ADVOGADOS_ANON = """
 CREATE TABLE IF NOT EXISTS advogados (
     advogado_id        VARCHAR PRIMARY KEY,
-    cpf_mascarado      VARCHAR
+    n_cpfs_vistos      INTEGER NOT NULL  -- count only, not the values
 );
 """
 
@@ -108,7 +108,7 @@ def write_databases(
     anon_path: Path,
     full_path: Path | None,
     payments: list[Payment],
-    identities: dict[tuple[str, str | None], AdvogadoIdentity],
+    identities: dict[str, AdvogadoIdentity],
     ckan_payload: dict,
     transparencia_sources: list[dict],
 ) -> dict:
@@ -125,7 +125,7 @@ def write_databases(
     pagamentos_df = pd.DataFrame(
         [
             {
-                "advogado_id": identities[(normalize_name(p.nome), p.cpf_mascarado)].advogado_id,
+                "advogado_id": identities[normalize_name(p.nome)].advogado_id,
                 "processo": p.processo,
                 "ano_processo": p.ano_processo,
                 "valor_bruto": p.valor_bruto,
@@ -154,12 +154,17 @@ def write_databases(
                 "advogado_id": i.advogado_id,
                 "nome": i.nome,
                 "nome_normalizado": i.nome_normalizado,
-                "cpf_mascarado": i.cpf_mascarado,
+                "cpfs_vistos": "|".join(i.cpfs_vistos) if i.cpfs_vistos else None,
             }
             for i in identities.values()
         ]
     )
-    advogados_anon_df = advogados_full_df[["advogado_id", "cpf_mascarado"]].copy()
+    advogados_anon_df = pd.DataFrame(
+        [
+            {"advogado_id": i.advogado_id, "n_cpfs_vistos": len(i.cpfs_vistos)}
+            for i in identities.values()
+        ]
+    )
 
     agregado_rows = [
         {

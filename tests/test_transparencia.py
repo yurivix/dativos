@@ -41,11 +41,16 @@ def test_pseudonym_diverges_with_different_salt():
     assert a != b
 
 
-def test_pseudonym_distinguishes_different_cpf():
+def test_pseudonym_same_name_same_id_regardless_of_cpf_mask():
+    """SEFAZ publishes the same person's CPF with different mask formats
+    across yearly files. The pseudonym must NOT depend on the mask, else
+    we silently split one lawyer into two ADV_ids (real bug seen on Solange,
+    Eliana, Ericka, Joselita, Pablo, Rita, Caroline, Juliano, Keler).
+    """
     s = "fixed-salt"
-    a = pseudonym("João Silva", "***123456**", s)
-    b = pseudonym("João Silva", "***999999**", s)
-    assert a != b
+    a = pseudonym("Solange do Nascimento Oliveira Prata", "***42351***", s)
+    b = pseudonym("Solange do Nascimento Oliveira Prata", "***423517**", s)
+    assert a == b
 
 
 # ── CNJ year extraction ─────────────────────────────────────────────────
