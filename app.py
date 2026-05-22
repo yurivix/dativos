@@ -11,6 +11,7 @@ from pathlib import Path
 
 import altair as alt
 import duckdb
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -1015,6 +1016,221 @@ with tabs[8]:
                         .properties(height=450)
                     )
                     st.altair_chart(chart, use_container_width=True)
+
+                # ── Análise estatística ────────────────────────────────
+                st.markdown("---")
+                st.markdown("### 📊 Análise estatística — a Comissão está na mesma curva dos demais?")
+                st.caption(
+                    "Teste formal **Mann-Whitney U** (não-paramétrico): testa se "
+                    "as distribuições de valor total recebido têm forma/local "
+                    "compatíveis ou são distintas estatisticamente."
+                )
+
+                mw = com_mod.mann_whitney_u(con, found_ids)
+                if mw["p"] < 0.001:
+                    veredito = "🔴 Diferença EXTREMAMENTE significativa"
+                elif mw["p"] < 0.01:
+                    veredito = "🟠 Diferença muito significativa"
+                elif mw["p"] < 0.05:
+                    veredito = "🟡 Diferença significativa"
+                else:
+                    veredito = "🟢 Sem evidência de diferença"
+
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("p-value (Mann-Whitney U)",
+                          f"{mw['p']:.2e}",
+                          help="Probabilidade de ver esta diferença por acaso. p<0.05 = significativo.")
+                k2.metric("Z-statistic", f"{mw['Z']:+.2f}",
+                          help="Quantos desvios-padrão a Comissão está deslocada.")
+                k3.metric("Prob. de superioridade",
+                          f"{mw['prob_sup']:.1%}",
+                          help="Chance de um membro escolhido aleatoriamente "
+                               "receber MAIS que um advogado aleatório dos demais. "
+                               "50% = igual; 100% = sempre maior.")
+                k4.metric("Veredito",
+                          veredito.split(" ", 1)[0],
+                          veredito.split(" ", 1)[1] if " " in veredito else "")
+
+                # Descritivas
+                st.markdown("#### Estatísticas descritivas")
+                desc = com_mod.estatisticas_descritivas(con, found_ids)
+                st.dataframe(
+                    desc.rename(columns={
+                        "grupo": "Grupo", "n": "N",
+                        "media": "Média", "desvio": "Desvio-padrão",
+                        "min": "Mínimo", "p25": "P25",
+                        "p50": "Mediana (P50)", "p75": "P75",
+                        "p90": "P90", "p95": "P95", "p99": "P99",
+                        "max": "Máximo",
+                    }).style.format({
+                        c: "{:,.2f}" for c in
+                        ["Média", "Desvio-padrão", "Mínimo", "P25", "Mediana (P50)",
+                         "P75", "P90", "P95", "P99", "Máximo"]
+                    }),
+                    use_container_width=True, hide_index=True,
+                )
+
+                # 4 gráficos lado a lado em 2x2
+                serie = com_mod.serie_por_grupo(con, found_ids)
+                hist = com_mod.histograma_buckets(con, found_ids)
+                cdf  = com_mod.cdf_data(con, found_ids)
+                pct_membros = com_mod.percentil_de_cada_membro(con, found_ids)
+
+                COLOR_SCALE = alt.Scale(
+                    domain=["Comissão", "Demais"],
+                    range=["#d62728", "#1f77b4"],
+                )
+
+                g1, g2 = st.columns(2)
+
+                # Gráfico 1: Boxplot lado a lado em log
+                with g1:
+                    st.markdown("**Boxplot — log-scale**")
+                    chart_box = (
+                        alt.Chart(serie)
+                        .mark_boxplot(size=60, extent="min-max")
+                        .encode(
+                            x=alt.X("grupo:N", title="", scale=alt.Scale(paddingInner=0.5)),
+                            y=alt.Y("total:Q", title="R$ total recebido",
+                                    scale=alt.Scale(type="log")),
+                            color=alt.Color("grupo:N", scale=COLOR_SCALE, legend=None),
+                        )
+                        .properties(height=320)
+                    )
+                    st.altair_chart(chart_box, use_container_width=True)
+                    st.caption(
+                        "A caixa contém 50% dos advogados (P25 a P75). Linha central = mediana. "
+                        "Se as caixas não se sobrepõem, as distribuições são claramente distintas."
+                    )
+
+                # Gráfico 2: Histograma sobreposto em buckets de R$
+                with g2:
+                    st.markdown("**Histograma (% por bucket)**")
+                    chart_hist = (
+                        alt.Chart(hist)
+                        .mark_bar(opacity=0.75)
+                        .encode(
+                            x=alt.X("bucket:N", title="Faixa de R$",
+                                    sort=["< 1k","1-5k","5-10k","10-25k","25-50k",
+                                          "50-100k","100-200k","200-500k","500k-1M","> 1M"]),
+                            y=alt.Y("pct:Q", title="% dos advogados do grupo",
+                                    axis=alt.Axis(format=".0%")),
+                            color=alt.Color("grupo:N", scale=COLOR_SCALE,
+                                            legend=alt.Legend(orient="top")),
+                            xOffset="grupo:N",
+                            tooltip=[
+                                alt.Tooltip("grupo:N"),
+                                alt.Tooltip("bucket:N", title="Faixa"),
+                                alt.Tooltip("n:Q", title="N advogados"),
+                                alt.Tooltip("pct:Q", title="% do grupo", format=".1%"),
+                            ],
+                        )
+                        .properties(height=320)
+                    )
+                    st.altair_chart(chart_hist, use_container_width=True)
+                    st.caption(
+                        "A massa da Comissão está em R$ 50k-200k; a dos demais em < R$ 5k. "
+                        "Bimodalidade da Comissão = poucos no meio."
+                    )
+
+                g3, g4 = st.columns(2)
+
+                # Gráfico 3: CDF (curva acumulada)
+                with g3:
+                    st.markdown("**CDF — % acumulada de advogados que ficam abaixo de X reais**")
+                    chart_cdf = (
+                        alt.Chart(cdf)
+                        .mark_line(strokeWidth=2.5)
+                        .encode(
+                            x=alt.X("total:Q", title="R$ total recebido",
+                                    scale=alt.Scale(type="log")),
+                            y=alt.Y("cdf:Q", title="% acumulada",
+                                    axis=alt.Axis(format=".0%")),
+                            color=alt.Color("grupo:N", scale=COLOR_SCALE,
+                                            legend=alt.Legend(orient="top")),
+                            tooltip=[
+                                "grupo:N",
+                                alt.Tooltip("total:Q", title="R$", format=",.2f"),
+                                alt.Tooltip("cdf:Q", title="% até aqui", format=".1%"),
+                            ],
+                        )
+                        .properties(height=320)
+                    )
+                    st.altair_chart(chart_cdf, use_container_width=True)
+                    st.caption(
+                        "Se as curvas estão separadas, a Comissão tem uma cauda muito "
+                        "mais 'pra direita' (recebe mais) que os demais."
+                    )
+
+                # Gráfico 4: Strip plot — cada membro como bolinha sobre a curva dos demais
+                with g4:
+                    st.markdown("**Posição de cada membro (R$ em log)**")
+                    # Demais como bolinhas semi-transparentes; membros destacados.
+                    dem_sample = serie[serie["grupo"] == "Demais"].sample(
+                        n=min(1500, (serie["grupo"] == "Demais").sum()),
+                        random_state=42,
+                    )
+                    dem_sample["y_jit"] = np.random.uniform(0, 1, len(dem_sample))
+                    com_pts = serie[serie["grupo"] == "Comissão"].copy()
+                    com_pts["y_jit"] = np.random.uniform(0.2, 0.8, len(com_pts))
+
+                    bg = (
+                        alt.Chart(dem_sample)
+                        .mark_circle(opacity=0.15, color="#1f77b4")
+                        .encode(
+                            x=alt.X("total:Q", title="R$ total recebido",
+                                    scale=alt.Scale(type="log")),
+                            y=alt.Y("y_jit:Q", title="", axis=None),
+                            tooltip=[
+                                alt.Tooltip("nome:N"),
+                                alt.Tooltip("total:Q", title="R$", format=",.2f"),
+                            ],
+                        )
+                    )
+                    fg = (
+                        alt.Chart(com_pts)
+                        .mark_circle(size=200, opacity=0.95, color="#d62728",
+                                     stroke="white", strokeWidth=2)
+                        .encode(
+                            x=alt.X("total:Q"),
+                            y=alt.Y("y_jit:Q"),
+                            tooltip=[
+                                alt.Tooltip("nome:N", title="Membro"),
+                                alt.Tooltip("total:Q", title="R$", format=",.2f"),
+                            ],
+                        )
+                    )
+                    st.altair_chart(
+                        (bg + fg).properties(height=320),
+                        use_container_width=True,
+                    )
+                    st.caption(
+                        "🔴 Membros da comissão · 🔵 Amostra dos demais. "
+                        "Se os 🔴 estão concentrados na direita do gráfico, é "
+                        "evidência visual da diferença de patamar."
+                    )
+
+                # Tabela de percentil + Z de cada membro (resumo da análise)
+                st.markdown("#### Percentil de cada membro na distribuição dos demais")
+                show = pct_membros[["nome", "total", "percentil", "z_log"]].copy()
+                show = show.rename(columns={
+                    "nome": "Nome", "total": "Total (R$)",
+                    "percentil": "Percentil",
+                    "z_log": "Z (log) — |Z|>2 anomalia",
+                })
+                def _hi(v):
+                    if pd.isna(v): return ""
+                    if v >= 0.99: return "background-color:#fee;color:#900;font-weight:bold"
+                    if v >= 0.95: return "background-color:#fff4e5"
+                    return ""
+                st.dataframe(
+                    show.style.format({
+                        "Total (R$)": "{:,.2f}",
+                        "Percentil": "{:.2%}",
+                        "Z (log) — |Z|>2 anomalia": "{:+.2f}",
+                    }).applymap(_hi, subset=["Percentil"]),
+                    use_container_width=True, hide_index=True, height=520,
+                )
 
 
 # ===== RECONCILIAÇÃO ====================================================

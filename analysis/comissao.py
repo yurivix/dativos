@@ -5,12 +5,14 @@ privado (PRIVATE=True), porque o matching depende dos nomes reais.
 """
 from __future__ import annotations
 
+import math
 import unicodedata
 from dataclasses import dataclass
 from difflib import get_close_matches
 from typing import Iterable
 
 import duckdb
+import numpy as np
 import pandas as pd
 
 
@@ -217,3 +219,158 @@ def evolucao_temporal(
         GROUP BY p.advogado_id, a.nome, p.ano
         ORDER BY p.ano, a.nome
     """).df()
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Análise estatística (testes + descritivas + dados pra gráficos)
+# ────────────────────────────────────────────────────────────────────────
+
+def _totals_por_advogado(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+    return con.execute("""
+        SELECT p.advogado_id, a.nome,
+               SUM(p.valor_bruto) AS total,
+               COUNT(*) AS n_pgto
+        FROM pagamentos p JOIN advogados a USING (advogado_id)
+        GROUP BY p.advogado_id, a.nome
+    """).df()
+
+
+def serie_por_grupo(
+    con: duckdb.DuckDBPyConnection,
+    advogado_ids: list[str],
+) -> pd.DataFrame:
+    """Dataset longo para Altair: cada linha é um advogado, com flag de grupo."""
+    df = _totals_por_advogado(con)
+    df["grupo"] = df["advogado_id"].apply(
+        lambda i: "Comissão" if i in advogado_ids else "Demais"
+    )
+    df["total_log"] = np.log10(df["total"].clip(lower=1))
+    return df
+
+
+def estatisticas_descritivas(
+    con: duckdb.DuckDBPyConnection,
+    advogado_ids: list[str],
+) -> pd.DataFrame:
+    """Tabela com média, mediana, P25/P75/P90/P95/P99, min, max por grupo."""
+    df = serie_por_grupo(con, advogado_ids)
+    rows = []
+    for grupo, sub in df.groupby("grupo"):
+        s = sub["total"]
+        rows.append({
+            "grupo":  grupo,
+            "n":      int(len(s)),
+            "media":  s.mean(),
+            "desvio": s.std(),
+            "min":    s.min(),
+            "p25":    s.quantile(.25),
+            "p50":    s.median(),
+            "p75":    s.quantile(.75),
+            "p90":    s.quantile(.90),
+            "p95":    s.quantile(.95),
+            "p99":    s.quantile(.99),
+            "max":    s.max(),
+        })
+    return pd.DataFrame(rows).set_index("grupo").reindex(["Comissão", "Demais"]).reset_index()
+
+
+def mann_whitney_u(
+    con: duckdb.DuckDBPyConnection,
+    advogado_ids: list[str],
+) -> dict:
+    """Mann-Whitney U test (bilateral, com correção para ties).
+
+    Retorna dict com U, Z, p (aproximação normal — ok para n grandes),
+    e probabilidade de superioridade.
+    """
+    df = _totals_por_advogado(con)
+    com = df[df["advogado_id"].isin(advogado_ids)]["total"].values
+    dem = df[~df["advogado_id"].isin(advogado_ids)]["total"].values
+    n1, n2 = len(com), len(dem)
+    if n1 == 0 or n2 == 0:
+        return {"U": 0, "Z": 0, "p": 1.0, "prob_sup": 0.5,
+                "n_comissao": n1, "n_demais": n2}
+
+    combined = np.concatenate([com, dem])
+    labels = np.array([1] * n1 + [0] * n2)
+    order = np.argsort(combined)
+    ranks = np.empty_like(order, dtype=float)
+    ranks[order] = np.arange(1, len(combined) + 1)
+
+    # Ajuste para empates: média dos ranks
+    t = pd.DataFrame({"v": combined, "lab": labels, "rk": ranks})
+    t["rk_adj"] = t.groupby("v")["rk"].transform("mean")
+
+    R1 = t.loc[t["lab"] == 1, "rk_adj"].sum()
+    U1 = R1 - n1 * (n1 + 1) / 2
+
+    mean_U = n1 * n2 / 2
+    std_U = math.sqrt(n1 * n2 * (n1 + n2 + 1) / 12)
+    Z = (U1 - mean_U) / std_U if std_U > 0 else 0.0
+
+    # p-value bilateral via aproximação normal
+    p = 2 * (1 - 0.5 * (1 + math.erf(abs(Z) / math.sqrt(2))))
+    return {
+        "U": float(U1),
+        "Z": float(Z),
+        "p": float(p),
+        "prob_sup": float(U1 / (n1 * n2)) if n1 * n2 else 0.5,
+        "n_comissao": n1,
+        "n_demais": n2,
+    }
+
+
+def percentil_de_cada_membro(
+    con: duckdb.DuckDBPyConnection,
+    advogado_ids: list[str],
+) -> pd.DataFrame:
+    """Cada membro com seu percentil na distribuição dos DEMAIS (alto = melhor)."""
+    df = _totals_por_advogado(con)
+    dem = np.sort(df[~df["advogado_id"].isin(advogado_ids)]["total"].values)
+    n_dem = len(dem)
+    sub = df[df["advogado_id"].isin(advogado_ids)].copy()
+    sub["percentil"] = sub["total"].apply(
+        lambda v: np.searchsorted(dem, v) / n_dem if n_dem else 0.0
+    )
+
+    # Z-score robusto em log-scale
+    log_dem = np.log10(dem.clip(min=1))
+    med, mad = np.median(log_dem), np.median(np.abs(log_dem - np.median(log_dem)))
+    sigma = 1.4826 * mad
+    sub["z_log"] = sub["total"].apply(
+        lambda v: (math.log10(max(v, 1)) - med) / sigma if sigma > 0 else 0.0
+    )
+    return sub.sort_values("percentil", ascending=False)
+
+
+def histograma_buckets(
+    con: duckdb.DuckDBPyConnection,
+    advogado_ids: list[str],
+) -> pd.DataFrame:
+    """Frequência em buckets fixos de R$ para cada grupo."""
+    df = _totals_por_advogado(con)
+    df["grupo"] = df["advogado_id"].apply(
+        lambda i: "Comissão" if i in advogado_ids else "Demais"
+    )
+    edges = [0, 1000, 5000, 10000, 25000, 50000, 100000, 200000, 500000, 1_000_000, float("inf")]
+    labels = ["< 1k", "1-5k", "5-10k", "10-25k", "25-50k", "50-100k",
+              "100-200k", "200-500k", "500k-1M", "> 1M"]
+    df["bucket"] = pd.cut(df["total"], bins=edges, labels=labels, right=False)
+    counts = df.groupby(["grupo", "bucket"]).size().reset_index(name="n")
+    totais = df.groupby("grupo").size().to_dict()
+    counts["pct"] = counts.apply(lambda r: r["n"] / totais[r["grupo"]] if totais[r["grupo"]] else 0, axis=1)
+    return counts
+
+
+def cdf_data(
+    con: duckdb.DuckDBPyConnection,
+    advogado_ids: list[str],
+) -> pd.DataFrame:
+    """CDF empírica para cada grupo (para plotar curva acumulada)."""
+    df = serie_por_grupo(con, advogado_ids)
+    parts = []
+    for grupo, sub in df.groupby("grupo"):
+        s = np.sort(sub["total"].values)
+        cum = np.arange(1, len(s) + 1) / len(s)
+        parts.append(pd.DataFrame({"grupo": grupo, "total": s, "cdf": cum}))
+    return pd.concat(parts, ignore_index=True)
