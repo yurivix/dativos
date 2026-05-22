@@ -1165,50 +1165,78 @@ with tabs[8]:
                 # Gráfico 4: Strip plot — cada membro como bolinha sobre a curva dos demais
                 with g4:
                     st.markdown("**Posição de cada membro (R$ em log)**")
-                    # Demais como bolinhas semi-transparentes; membros destacados.
-                    dem_sample = serie[serie["grupo"] == "Demais"].sample(
-                        n=min(1500, (serie["grupo"] == "Demais").sum()),
-                        random_state=42,
-                    )
-                    dem_sample["y_jit"] = np.random.uniform(0, 1, len(dem_sample))
-                    com_pts = serie[serie["grupo"] == "Comissão"].copy()
-                    com_pts["y_jit"] = np.random.uniform(0.2, 0.8, len(com_pts))
 
-                    bg = (
-                        alt.Chart(dem_sample)
-                        .mark_circle(opacity=0.15, color="#1f77b4")
-                        .encode(
-                            x=alt.X("total:Q", title="R$ total recebido",
-                                    scale=alt.Scale(type="log")),
-                            y=alt.Y("y_jit:Q", title="", axis=None),
-                            tooltip=[
-                                alt.Tooltip("nome:N"),
-                                alt.Tooltip("total:Q", title="R$", format=",.2f"),
-                            ],
+                    # Seletor de ano específico para o strip plot
+                    anos_strip = [int(r[0]) for r in con.execute(
+                        "SELECT DISTINCT ano FROM pagamentos ORDER BY ano"
+                    ).fetchall()]
+                    strip_ano_sel = st.selectbox(
+                        "Filtrar por ano de pagamento",
+                        options=["Vida toda (todos os anos)"] + anos_strip,
+                        index=0,
+                        key="strip_ano_sel",
+                        help="Recalcula o gráfico considerando apenas pagamentos "
+                             "daquele ano. 'Vida toda' soma todos os anos.",
+                    )
+                    strip_ano = None if strip_ano_sel == "Vida toda (todos os anos)" else int(strip_ano_sel)
+                    serie_strip = com_mod.serie_por_grupo(con, found_ids, ano=strip_ano)
+
+                    n_com_strip = int((serie_strip["grupo"] == "Comissão").sum())
+                    n_dem_strip = int((serie_strip["grupo"] == "Demais").sum())
+                    if n_com_strip == 0:
+                        st.warning(
+                            f"Nenhum membro da comissão recebeu em {strip_ano}. "
+                            "Nada para plotar."
                         )
-                    )
-                    fg = (
-                        alt.Chart(com_pts)
-                        .mark_circle(size=200, opacity=0.95, color="#d62728",
-                                     stroke="white", strokeWidth=2)
-                        .encode(
-                            x=alt.X("total:Q"),
-                            y=alt.Y("y_jit:Q"),
-                            tooltip=[
-                                alt.Tooltip("nome:N", title="Membro"),
-                                alt.Tooltip("total:Q", title="R$", format=",.2f"),
-                            ],
+                    else:
+                        # Demais: amostra para não poluir; Comissão: tudo
+                        dem_strip = serie_strip[serie_strip["grupo"] == "Demais"]
+                        dem_sample = dem_strip.sample(
+                            n=min(1500, n_dem_strip), random_state=42,
+                        ) if n_dem_strip else dem_strip
+                        dem_sample = dem_sample.copy()
+                        dem_sample["y_jit"] = np.random.uniform(0, 1, len(dem_sample))
+                        com_pts = serie_strip[serie_strip["grupo"] == "Comissão"].copy()
+                        com_pts["y_jit"] = np.random.uniform(0.2, 0.8, len(com_pts))
+
+                        bg = (
+                            alt.Chart(dem_sample)
+                            .mark_circle(opacity=0.15, color="#1f77b4")
+                            .encode(
+                                x=alt.X("total:Q", title="R$ total recebido"
+                                        + (f" em {strip_ano}" if strip_ano else " (vida toda)"),
+                                        scale=alt.Scale(type="log")),
+                                y=alt.Y("y_jit:Q", title="", axis=None),
+                                tooltip=[
+                                    alt.Tooltip("nome:N"),
+                                    alt.Tooltip("total:Q", title="R$", format=",.2f"),
+                                ],
+                            )
                         )
-                    )
-                    st.altair_chart(
-                        (bg + fg).properties(height=320),
-                        use_container_width=True,
-                    )
-                    st.caption(
-                        "🔴 Membros da comissão · 🔵 Amostra dos demais. "
-                        "Se os 🔴 estão concentrados na direita do gráfico, é "
-                        "evidência visual da diferença de patamar."
-                    )
+                        fg = (
+                            alt.Chart(com_pts)
+                            .mark_circle(size=200, opacity=0.95, color="#d62728",
+                                         stroke="white", strokeWidth=2)
+                            .encode(
+                                x=alt.X("total:Q"),
+                                y=alt.Y("y_jit:Q"),
+                                tooltip=[
+                                    alt.Tooltip("nome:N", title="Membro"),
+                                    alt.Tooltip("total:Q", title="R$", format=",.2f"),
+                                ],
+                            )
+                        )
+                        st.altair_chart(
+                            (bg + fg).properties(height=320),
+                            use_container_width=True,
+                        )
+                        st.caption(
+                            f"🔴 Membros da comissão ({n_com_strip} pessoas) · "
+                            f"🔵 Amostra dos demais ({len(dem_sample)} de {n_dem_strip}). "
+                            f"Filtro: **{strip_ano_sel}**. "
+                            "Se os 🔴 estão concentrados na direita, é evidência visual "
+                            "da diferença de patamar."
+                        )
 
                 # Tabela de percentil + Z de cada membro (resumo da análise)
                 st.markdown("#### Percentil de cada membro na distribuição dos demais")

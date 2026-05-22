@@ -225,12 +225,17 @@ def evolucao_temporal(
 # Análise estatística (testes + descritivas + dados pra gráficos)
 # ────────────────────────────────────────────────────────────────────────
 
-def _totals_por_advogado(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
-    return con.execute("""
+def _totals_por_advogado(
+    con: duckdb.DuckDBPyConnection,
+    ano: int | None = None,
+) -> pd.DataFrame:
+    where = f"WHERE p.ano = {int(ano)}" if ano else ""
+    return con.execute(f"""
         SELECT p.advogado_id, a.nome,
                SUM(p.valor_bruto) AS total,
                COUNT(*) AS n_pgto
         FROM pagamentos p JOIN advogados a USING (advogado_id)
+        {where}
         GROUP BY p.advogado_id, a.nome
     """).df()
 
@@ -238,9 +243,14 @@ def _totals_por_advogado(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
 def serie_por_grupo(
     con: duckdb.DuckDBPyConnection,
     advogado_ids: list[str],
+    ano: int | None = None,
 ) -> pd.DataFrame:
-    """Dataset longo para Altair: cada linha é um advogado, com flag de grupo."""
-    df = _totals_por_advogado(con)
+    """Dataset longo para Altair: cada linha é um advogado, com flag de grupo.
+
+    Se `ano` for fornecido, considera apenas pagamentos daquele ano. Advogados
+    sem pagamento no ano são omitidos automaticamente (sem entrada no GROUP BY).
+    """
+    df = _totals_por_advogado(con, ano=ano)
     df["grupo"] = df["advogado_id"].apply(
         lambda i: "Comissão" if i in advogado_ids else "Demais"
     )
