@@ -60,8 +60,12 @@ def match_members(
 ) -> list[Match]:
     """Match each (cargo, nome) against the advogados table.
 
-    Requires PRIVATE mode (advogados table has the `nome` column).
+    Requires PRIVATE mode (advogados table has the `nome` column). For the
+    anon DB, the caller should use the pre-computed `comissao` table instead.
     """
+    cols = [r[0] for r in con.execute("DESCRIBE advogados").fetchall()]
+    if "nome" not in cols:
+        return []
     adv = con.execute(
         "SELECT advogado_id, nome, nome_normalizado FROM advogados"
     ).df()
@@ -88,24 +92,24 @@ def metricas_por_membro(
     con: duckdb.DuckDBPyConnection,
     advogado_ids: list[str],
 ) -> pd.DataFrame:
-    """Estatísticas detalhadas por membro encontrado."""
+    """Estatísticas detalhadas por membro encontrado (sem nome — caller anexa)."""
     if not advogado_ids:
         return pd.DataFrame()
     ids_sql = "(" + ",".join(f"'{aid}'" for aid in advogado_ids) + ")"
     return con.execute(f"""
-        SELECT p.advogado_id, a.nome,
+        SELECT advogado_id,
                COUNT(*)                    AS n_pgto,
-               SUM(p.valor_bruto)          AS total,
-               AVG(p.valor_bruto)          AS ticket,
-               COUNT(DISTINCT p.processo)  AS n_proc,
-               COUNT(DISTINCT p.comarca)   AS n_com,
-               MIN(p.ano)                  AS pgto_min,
-               MAX(p.ano)                  AS pgto_max,
+               SUM(valor_bruto)            AS total,
+               AVG(valor_bruto)            AS ticket,
+               COUNT(DISTINCT processo)    AS n_proc,
+               COUNT(DISTINCT comarca)     AS n_com,
+               MIN(ano)                    AS pgto_min,
+               MAX(ano)                    AS pgto_max,
                AVG(CASE WHEN ano_processo IS NOT NULL
                         THEN ano - ano_processo END) AS anos_medio
-        FROM pagamentos p JOIN advogados a USING (advogado_id)
-        WHERE p.advogado_id IN {ids_sql}
-        GROUP BY p.advogado_id, a.nome
+        FROM pagamentos
+        WHERE advogado_id IN {ids_sql}
+        GROUP BY advogado_id
         ORDER BY total DESC NULLS LAST
     """).df()
 
@@ -161,7 +165,7 @@ def ranking_membros(
     con: duckdb.DuckDBPyConnection,
     advogado_ids: list[str],
 ) -> pd.DataFrame:
-    """Posição de cada membro no ranking geral por total recebido."""
+    """Posição de cada membro no ranking geral (sem nome — caller anexa)."""
     if not advogado_ids:
         return pd.DataFrame()
     df = con.execute("""
@@ -172,9 +176,7 @@ def ranking_membros(
     """).df()
     df["rk"] = range(1, len(df) + 1)
     df["pct_top"] = df["rk"] / len(df)
-    sub = df[df["advogado_id"].isin(advogado_ids)].copy()
-    names = con.execute("SELECT advogado_id, nome FROM advogados").df()
-    return sub.merge(names, on="advogado_id", how="left").sort_values("rk")
+    return df[df["advogado_id"].isin(advogado_ids)].copy().sort_values("rk")
 
 
 def prepos_membros(
@@ -182,19 +184,19 @@ def prepos_membros(
     advogado_ids: list[str],
     cutoff_year: int,
 ) -> pd.DataFrame:
-    """Pré/Pós cutoff_year por membro + fator de crescimento."""
+    """Pré/Pós cutoff_year por membro + fator (sem nome — caller anexa)."""
     if not advogado_ids:
         return pd.DataFrame()
     ids_sql = "(" + ",".join(f"'{aid}'" for aid in advogado_ids) + ")"
     df = con.execute(f"""
-        SELECT p.advogado_id, a.nome,
+        SELECT advogado_id,
                SUM(CASE WHEN ano <  {cutoff_year} THEN valor_bruto ELSE 0 END) AS pre,
                SUM(CASE WHEN ano >= {cutoff_year} THEN valor_bruto ELSE 0 END) AS pos,
                SUM(CASE WHEN ano <  {cutoff_year} THEN 1 ELSE 0 END) AS n_pre,
                SUM(CASE WHEN ano >= {cutoff_year} THEN 1 ELSE 0 END) AS n_pos
-        FROM pagamentos p JOIN advogados a USING (advogado_id)
-        WHERE p.advogado_id IN {ids_sql}
-        GROUP BY p.advogado_id, a.nome
+        FROM pagamentos
+        WHERE advogado_id IN {ids_sql}
+        GROUP BY advogado_id
     """).df()
     df["fator"] = df.apply(
         lambda r: (r["pos"] / r["pre"]) if r["pre"] > 0 else None, axis=1
@@ -206,18 +208,18 @@ def evolucao_temporal(
     con: duckdb.DuckDBPyConnection,
     advogado_ids: list[str],
 ) -> pd.DataFrame:
-    """Total por ano de pagamento para cada membro (longo formato para Altair)."""
+    """Total por ano por membro (sem nome — caller anexa)."""
     if not advogado_ids:
         return pd.DataFrame()
     ids_sql = "(" + ",".join(f"'{aid}'" for aid in advogado_ids) + ")"
     return con.execute(f"""
-        SELECT p.advogado_id, a.nome, p.ano,
-               SUM(p.valor_bruto) AS total,
+        SELECT advogado_id, ano,
+               SUM(valor_bruto) AS total,
                COUNT(*) AS n_pgto
-        FROM pagamentos p JOIN advogados a USING (advogado_id)
-        WHERE p.advogado_id IN {ids_sql}
-        GROUP BY p.advogado_id, a.nome, p.ano
-        ORDER BY p.ano, a.nome
+        FROM pagamentos
+        WHERE advogado_id IN {ids_sql}
+        GROUP BY advogado_id, ano
+        ORDER BY ano, advogado_id
     """).df()
 
 
@@ -229,14 +231,16 @@ def _totals_por_advogado(
     con: duckdb.DuckDBPyConnection,
     ano: int | None = None,
 ) -> pd.DataFrame:
-    where = f"WHERE p.ano = {int(ano)}" if ano else ""
+    """Apenas advogado_id + métricas — sem coluna `nome` para funcionar
+    no banco anon. O caller anexa o nome se estiver em modo PRIVATE."""
+    where = f"WHERE ano = {int(ano)}" if ano else ""
     return con.execute(f"""
-        SELECT p.advogado_id, a.nome,
-               SUM(p.valor_bruto) AS total,
+        SELECT advogado_id,
+               SUM(valor_bruto) AS total,
                COUNT(*) AS n_pgto
-        FROM pagamentos p JOIN advogados a USING (advogado_id)
+        FROM pagamentos
         {where}
-        GROUP BY p.advogado_id, a.nome
+        GROUP BY advogado_id
     """).df()
 
 

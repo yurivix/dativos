@@ -1058,21 +1058,26 @@ with tabs[7]:
 # ===== COMISSÃO =========================================================
 with tabs[8]:
     st.subheader("Análise da Comissão de Dativos")
-    st.caption(
-        "Compara membros da comissão (você pode editar a lista abaixo) contra "
-        "o restante dos advogados na base. Útil para identificar padrões "
-        "atípicos de pagamentos a quem fiscaliza o sistema."
-    )
-
-    if not PRIVATE:
-        st.warning(
-            "Esta aba só funciona em **modo privado** (com nomes reais). "
-            "O matching de nomes é necessário para vincular aos `advogado_id`. "
-            "Rode local com `streamlit run app.py` quando o `dativos_full.duckdb` existir."
+    if PRIVATE:
+        st.caption(
+            "Compara membros da comissão (você pode editar a lista abaixo) contra "
+            "o restante dos advogados na base. Útil para identificar padrões "
+            "atípicos de pagamentos a quem fiscaliza o sistema."
         )
     else:
+        st.caption(
+            "**Versão pública anonimizada**: membros da comissão pré-cadastrados "
+            "(matching feito no ETL local com salt) aparecem como `ADV_xxx` e cargo "
+            "genérico 'Membro'. Compara o grupo contra o restante da base."
+        )
+
+    # found_ids e cargo_map são calculados em ambos os modos
+    found_ids: list[str] = []
+    cargo_map: dict[str, str] = {}
+    matches = None  # populado só em modo privado (para o detalhe de matching)
+
+    if PRIVATE:
         st.markdown("**Membros da comissão** (edite cargos/nomes se necessário):")
-        # Editable list — defaults to the pre-configured 17 members
         default_df = pd.DataFrame(
             com_mod.COMISSAO_DEFAULT, columns=["Cargo", "Nome"]
         )
@@ -1086,28 +1091,21 @@ with tabs[8]:
                 "Nome": st.column_config.TextColumn(width="large"),
             },
         )
-
-        # Filter out empty rows
         edited = edited.dropna(how="all")
         edited = edited[edited["Nome"].astype(str).str.strip() != ""]
         members = list(zip(edited["Cargo"].fillna("").tolist(),
                            edited["Nome"].astype(str).tolist()))
 
-        if not members:
-            st.info("Adicione ao menos um nome para rodar a análise.")
-        else:
-            # ── Matching ──────────────────────────────────────────────
+        if members:
             matches = com_mod.match_members(con, members)
             n_exato = sum(1 for m in matches if m.method == "exato")
             n_fuzzy = sum(1 for m in matches if m.method == "fuzzy")
             n_nf    = sum(1 for m in matches if m.method == "nao_encontrado")
-
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Total", len(matches))
             c2.metric("Match exato", n_exato)
             c3.metric("Match fuzzy", n_fuzzy)
             c4.metric("Não encontrados", n_nf)
-
             with st.expander("🔎 Detalhe do matching", expanded=(n_fuzzy + n_nf > 0)):
                 match_df = pd.DataFrame([{
                     "Cargo": m.cargo,
@@ -1117,396 +1115,387 @@ with tabs[8]:
                     "ADV_id": m.advogado_id or "—",
                 } for m in matches])
                 st.dataframe(match_df, use_container_width=True, hide_index=True)
-
             found_ids = [m.advogado_id for m in matches if m.advogado_id]
+            cargo_map = {m.advogado_id: m.cargo for m in matches if m.advogado_id}
+    else:
+        # Modo anon: usa a tabela comissao pré-computada no ETL.
+        com_idx = load_comissao_index()
+        found_ids = com_idx["advogado_id"].tolist()
+        cargo_map = dict(zip(com_idx["advogado_id"], com_idx["cargo"]))
+        st.info(
+            f"📋 {len(found_ids)} membros pré-cadastrados (todos rotulados como "
+            f"'Membro' na visão pública)."
+        )
 
-            if not found_ids:
-                st.error("Nenhum nome casou com a base.")
-            else:
-                # ── Métricas por membro ──────────────────────────────
-                st.markdown("### 💰 Métricas por membro")
-                df_membros = com_mod.metricas_por_membro(con, found_ids)
-                # join cargo
-                cargo_map = {m.advogado_id: m.cargo for m in matches if m.advogado_id}
-                df_membros["cargo"] = df_membros["advogado_id"].map(cargo_map)
-                df_membros = df_membros[[
-                    "cargo", "nome", "n_pgto", "total", "ticket", "n_proc",
-                    "n_com", "pgto_min", "pgto_max", "anos_medio",
-                ]]
-                st.dataframe(
-                    df_membros.rename(columns={
-                        "cargo": "Cargo", "nome": "Nome",
-                        "n_pgto": "Pgto", "total": "Total (R$)",
-                        "ticket": "Ticket (R$)", "n_proc": "Processos",
-                        "n_com": "Comarcas",
-                        "pgto_min": "1º pgto", "pgto_max": "Último pgto",
-                        "anos_medio": "Anos médios até pgto",
-                    }).style.format({
-                        "Total (R$)": "{:,.2f}", "Ticket (R$)": "{:,.2f}",
-                        "Anos médios até pgto": "{:.2f}",
-                    }),
-                    use_container_width=True, hide_index=True, height=550,
-                )
+    if not found_ids:
+        st.warning("Lista de membros vazia.")
+    else:
+        # Helper: anexa nome se PRIVATE, senão usa advogado_id como rótulo.
+        # Toda exibição de "nome" usa esse helper, então funciona nos 2 modos.
+        def _label(df: pd.DataFrame, id_col: str = "advogado_id") -> pd.DataFrame:
+            if PRIVATE:
+                return attach_name(df, id_col=id_col)
+            out = df.copy()
+            out["nome"] = out[id_col]
+            return out
 
-                total_com = df_membros["total"].sum()
-                st.caption(
-                    f"Total recebido pelos {len(found_ids)} membros encontrados: "
-                    f"**{fmt_brl(total_com)}**"
-                )
+        nome_header = "Nome" if PRIVATE else "ADV_id"
 
-                # ── Comparativo Comissão vs Demais ───────────────────
-                st.markdown("### ⚖️ Comissão vs Demais (mediana e média por advogado)")
-                comp = com_mod.comparativo_medio(con, found_ids)
-                if not comp.empty:
-                    # Highlight ratio
-                    def _highlight(val):
-                        if pd.isna(val):
-                            return ""
-                        if val >= 3.0:
-                            return "background-color: #fee; color: #900; font-weight: bold;"
-                        if val >= 2.0:
-                            return "background-color: #fff4e5;"
-                        return ""
+        # ── Métricas por membro ────────────────────────────────────────────
+        st.markdown("### 💰 Métricas por membro")
+        df_membros = _label(com_mod.metricas_por_membro(con, found_ids))
+        df_membros["cargo"] = df_membros["advogado_id"].map(cargo_map).fillna("")
+        df_membros = df_membros[[
+            "cargo", "nome", "n_pgto", "total", "ticket", "n_proc",
+            "n_com", "pgto_min", "pgto_max", "anos_medio",
+        ]]
+        st.dataframe(
+            df_membros.rename(columns={
+                "cargo": "Cargo", "nome": nome_header,
+                "n_pgto": "Pgto", "total": "Total (R$)",
+                "ticket": "Ticket (R$)", "n_proc": "Processos",
+                "n_com": "Comarcas",
+                "pgto_min": "1º pgto", "pgto_max": "Último pgto",
+                "anos_medio": "Anos médios até pgto",
+            }).style.format({
+                "Total (R$)": "{:,.2f}", "Ticket (R$)": "{:,.2f}",
+                "Anos médios até pgto": "{:.2f}",
+            }),
+            use_container_width=True, hide_index=True, height=550,
+        )
+        total_com = df_membros["total"].sum()
+        st.caption(
+            f"Total recebido pelos {len(found_ids)} membros encontrados: "
+            f"**{fmt_brl(total_com)}**"
+        )
 
-                    st.dataframe(
-                        comp.rename(columns={
-                            "metrica": "Métrica",
-                            "comissao_med": "Com. mediana",
-                            "comissao_avg": "Com. média",
-                            "demais_med": "Demais mediana",
-                            "demais_avg": "Demais média",
-                            "razao_med": "Razão med",
-                        }).style.format({
-                            "Com. mediana": "{:,.2f}", "Com. média": "{:,.2f}",
-                            "Demais mediana": "{:,.2f}", "Demais média": "{:,.2f}",
-                            "Razão med": "{:.2f}×",
-                        }).applymap(_highlight, subset=["Razão med"]),
-                        use_container_width=True, hide_index=True,
-                    )
-                    st.caption(
-                        "🔴 Razão ≥ 3× | 🟠 Razão ≥ 2× — sinais a investigar."
-                    )
-
-                # ── Ranking ────────────────────────────────────────────
-                st.markdown("### 🏆 Posição no ranking geral")
-                rk = com_mod.ranking_membros(con, found_ids)
-                rk["cargo"] = rk["advogado_id"].map(cargo_map)
-                # Build clearer columns:
-                #   - "Posição" = N/total (e.g. "30 / 8.283")
-                #   - "Top X%" = quão alto na pirâmide (menor = melhor)
-                #   - "Percentil" = inverso, alto = melhor (98,79% = recebeu mais que 98,79% dos demais)
-                total_adv = int(con.execute(
-                    "SELECT COUNT(*) FROM (SELECT DISTINCT advogado_id FROM pagamentos)"
-                ).fetchone()[0])
-                rk["posicao_label"] = rk["rk"].apply(
-                    lambda n: f"#{int(n):,} / {total_adv:,}".replace(",", ".")
-                )
-                rk["top_pct"] = rk["pct_top"]            # menor = melhor (top 1% = 0,01)
-                rk["percentil"] = 1 - rk["pct_top"]      # maior = melhor (98,79%)
-                rk = rk[["posicao_label", "top_pct", "percentil", "cargo", "nome", "total"]]
-                st.caption(
-                    "**Como ler**: *Top X%* é onde a pessoa está na pirâmide "
-                    "(0,5% = melhor que 99,5% da base). *Percentil* é a "
-                    "versão complementar (98,8% = recebeu mais que 98,8% dos demais). "
-                    "São a mesma informação, formatos diferentes."
-                )
-                st.dataframe(
-                    rk.rename(columns={
-                        "posicao_label": "Posição",
-                        "top_pct": "Top X% (menor = melhor)",
-                        "percentil": "Percentil (maior = melhor)",
-                        "cargo": "Cargo", "nome": "Nome", "total": "Total (R$)",
-                    }).style.format({
-                        "Top X% (menor = melhor)": "{:.2%}",
-                        "Percentil (maior = melhor)": "{:.2%}",
-                        "Total (R$)": "{:,.2f}",
-                    }),
-                    use_container_width=True, hide_index=True, height=550,
-                )
-
-                # ── Pré × Pós cutoff ─────────────────────────────────
-                st.markdown(f"### 📅 Pré × Pós {cutoff_year}")
-                pp = com_mod.prepos_membros(con, found_ids, cutoff_year)
-                pp["cargo"] = pp["advogado_id"].map(cargo_map)
-                pp = pp[["cargo", "nome", "pre", "pos", "n_pre", "n_pos", "fator"]]
-                st.dataframe(
-                    pp.rename(columns={
-                        "cargo": "Cargo", "nome": "Nome",
-                        "pre": "Pré (R$)", "pos": "Pós (R$)",
-                        "n_pre": "Pgto pré", "n_pos": "Pgto pós",
-                        "fator": "Fator pós÷pré",
-                    }).style.format({
-                        "Pré (R$)": "{:,.2f}", "Pós (R$)": "{:,.2f}",
-                        "Fator pós÷pré": lambda v: f"{v:.2f}×" if pd.notna(v) else "—",
-                    }),
-                    use_container_width=True, hide_index=True, height=550,
-                )
-
-                # ── Evolução temporal ────────────────────────────────
-                st.markdown("### 📈 Evolução temporal (todos juntos)")
-                evol = com_mod.evolucao_temporal(con, found_ids)
-                if not evol.empty:
-                    chart = (
-                        alt.Chart(evol)
-                        .mark_line(point=alt.OverlayMarkDef(size=50), strokeWidth=2)
-                        .encode(
-                            x=alt.X("ano:O", title="Ano de pagamento"),
-                            y=alt.Y("total:Q", title="R$ no ano"),
-                            color=alt.Color("nome:N", title="Membro",
-                                            legend=alt.Legend(orient="bottom", columns=2)),
-                            tooltip=[
-                                alt.Tooltip("nome:N", title="Membro"),
-                                alt.Tooltip("ano:O", title="Ano"),
-                                alt.Tooltip("total:Q", title="R$", format=",.2f"),
-                                alt.Tooltip("n_pgto:Q", title="Pgto"),
-                            ],
-                        )
-                        .properties(height=450)
-                    )
-                    st.altair_chart(chart, use_container_width=True)
-
-                # ── Análise estatística ────────────────────────────────
-                st.markdown("---")
-                st.markdown("### 📊 Análise estatística — a Comissão está na mesma curva dos demais?")
-                st.caption(
-                    "Teste formal **Mann-Whitney U** (não-paramétrico): testa se "
-                    "as distribuições de valor total recebido têm forma/local "
-                    "compatíveis ou são distintas estatisticamente."
-                )
-
-                mw = com_mod.mann_whitney_u(con, found_ids)
-                if mw["p"] < 0.001:
-                    veredito = "🔴 Diferença EXTREMAMENTE significativa"
-                elif mw["p"] < 0.01:
-                    veredito = "🟠 Diferença muito significativa"
-                elif mw["p"] < 0.05:
-                    veredito = "🟡 Diferença significativa"
-                else:
-                    veredito = "🟢 Sem evidência de diferença"
-
-                k1, k2, k3, k4 = st.columns(4)
-                k1.metric("p-value (Mann-Whitney U)",
-                          f"{mw['p']:.2e}",
-                          help="Probabilidade de ver esta diferença por acaso. p<0.05 = significativo.")
-                k2.metric("Z-statistic", f"{mw['Z']:+.2f}",
-                          help="Quantos desvios-padrão a Comissão está deslocada.")
-                k3.metric("Prob. de superioridade",
-                          f"{mw['prob_sup']:.1%}",
-                          help="Chance de um membro escolhido aleatoriamente "
-                               "receber MAIS que um advogado aleatório dos demais. "
-                               "50% = igual; 100% = sempre maior.")
-                k4.metric("Veredito",
-                          veredito.split(" ", 1)[0],
-                          veredito.split(" ", 1)[1] if " " in veredito else "")
-
-                # Descritivas
-                st.markdown("#### Estatísticas descritivas")
-                desc = com_mod.estatisticas_descritivas(con, found_ids)
-                st.dataframe(
-                    desc.rename(columns={
-                        "grupo": "Grupo", "n": "N",
-                        "media": "Média", "desvio": "Desvio-padrão",
-                        "min": "Mínimo", "p25": "P25",
-                        "p50": "Mediana (P50)", "p75": "P75",
-                        "p90": "P90", "p95": "P95", "p99": "P99",
-                        "max": "Máximo",
-                    }).style.format({
-                        c: "{:,.2f}" for c in
-                        ["Média", "Desvio-padrão", "Mínimo", "P25", "Mediana (P50)",
-                         "P75", "P90", "P95", "P99", "Máximo"]
-                    }),
-                    use_container_width=True, hide_index=True,
-                )
-
-                # 4 gráficos lado a lado em 2x2
-                serie = com_mod.serie_por_grupo(con, found_ids)
-                hist = com_mod.histograma_buckets(con, found_ids)
-                cdf  = com_mod.cdf_data(con, found_ids)
-                pct_membros = com_mod.percentil_de_cada_membro(con, found_ids)
-
-                COLOR_SCALE = alt.Scale(
-                    domain=["Comissão", "Demais"],
-                    range=["#d62728", "#1f77b4"],
-                )
-
-                g1, g2 = st.columns(2)
-
-                # Gráfico 1: Boxplot lado a lado em log
-                with g1:
-                    st.markdown("**Boxplot — log-scale**")
-                    chart_box = (
-                        alt.Chart(serie)
-                        .mark_boxplot(size=60, extent="min-max")
-                        .encode(
-                            x=alt.X("grupo:N", title="", scale=alt.Scale(paddingInner=0.5)),
-                            y=alt.Y("total:Q", title="R$ total recebido",
-                                    scale=alt.Scale(type="log")),
-                            color=alt.Color("grupo:N", scale=COLOR_SCALE, legend=None),
-                        )
-                        .properties(height=320)
-                    )
-                    st.altair_chart(chart_box, use_container_width=True)
-                    st.caption(
-                        "A caixa contém 50% dos advogados (P25 a P75). Linha central = mediana. "
-                        "Se as caixas não se sobrepõem, as distribuições são claramente distintas."
-                    )
-
-                # Gráfico 2: Histograma sobreposto em buckets de R$
-                with g2:
-                    st.markdown("**Histograma (% por bucket)**")
-                    chart_hist = (
-                        alt.Chart(hist)
-                        .mark_bar(opacity=0.75)
-                        .encode(
-                            x=alt.X("bucket:N", title="Faixa de R$",
-                                    sort=["< 1k","1-5k","5-10k","10-25k","25-50k",
-                                          "50-100k","100-200k","200-500k","500k-1M","> 1M"]),
-                            y=alt.Y("pct:Q", title="% dos advogados do grupo",
-                                    axis=alt.Axis(format=".0%")),
-                            color=alt.Color("grupo:N", scale=COLOR_SCALE,
-                                            legend=alt.Legend(orient="top")),
-                            xOffset="grupo:N",
-                            tooltip=[
-                                alt.Tooltip("grupo:N"),
-                                alt.Tooltip("bucket:N", title="Faixa"),
-                                alt.Tooltip("n:Q", title="N advogados"),
-                                alt.Tooltip("pct:Q", title="% do grupo", format=".1%"),
-                            ],
-                        )
-                        .properties(height=320)
-                    )
-                    st.altair_chart(chart_hist, use_container_width=True)
-                    st.caption(
-                        "A massa da Comissão está em R$ 50k-200k; a dos demais em < R$ 5k. "
-                        "Bimodalidade da Comissão = poucos no meio."
-                    )
-
-                g3, g4 = st.columns(2)
-
-                # Gráfico 3: CDF (curva acumulada)
-                with g3:
-                    st.markdown("**CDF — % acumulada de advogados que ficam abaixo de X reais**")
-                    chart_cdf = (
-                        alt.Chart(cdf)
-                        .mark_line(strokeWidth=2.5)
-                        .encode(
-                            x=alt.X("total:Q", title="R$ total recebido",
-                                    scale=alt.Scale(type="log")),
-                            y=alt.Y("cdf:Q", title="% acumulada",
-                                    axis=alt.Axis(format=".0%")),
-                            color=alt.Color("grupo:N", scale=COLOR_SCALE,
-                                            legend=alt.Legend(orient="top")),
-                            tooltip=[
-                                "grupo:N",
-                                alt.Tooltip("total:Q", title="R$", format=",.2f"),
-                                alt.Tooltip("cdf:Q", title="% até aqui", format=".1%"),
-                            ],
-                        )
-                        .properties(height=320)
-                    )
-                    st.altair_chart(chart_cdf, use_container_width=True)
-                    st.caption(
-                        "Se as curvas estão separadas, a Comissão tem uma cauda muito "
-                        "mais 'pra direita' (recebe mais) que os demais."
-                    )
-
-                # Gráfico 4: Strip plot — cada membro como bolinha sobre a curva dos demais
-                with g4:
-                    st.markdown("**Posição de cada membro (R$ em log)**")
-
-                    # Seletor de ano específico para o strip plot
-                    anos_strip = [int(r[0]) for r in con.execute(
-                        "SELECT DISTINCT ano FROM pagamentos ORDER BY ano"
-                    ).fetchall()]
-                    strip_ano_sel = st.selectbox(
-                        "Filtrar por ano de pagamento",
-                        options=["Vida toda (todos os anos)"] + anos_strip,
-                        index=0,
-                        key="strip_ano_sel",
-                        help="Recalcula o gráfico considerando apenas pagamentos "
-                             "daquele ano. 'Vida toda' soma todos os anos.",
-                    )
-                    strip_ano = None if strip_ano_sel == "Vida toda (todos os anos)" else int(strip_ano_sel)
-                    serie_strip = com_mod.serie_por_grupo(con, found_ids, ano=strip_ano)
-
-                    n_com_strip = int((serie_strip["grupo"] == "Comissão").sum())
-                    n_dem_strip = int((serie_strip["grupo"] == "Demais").sum())
-                    if n_com_strip == 0:
-                        st.warning(
-                            f"Nenhum membro da comissão recebeu em {strip_ano}. "
-                            "Nada para plotar."
-                        )
-                    else:
-                        # Demais: amostra para não poluir; Comissão: tudo
-                        dem_strip = serie_strip[serie_strip["grupo"] == "Demais"]
-                        dem_sample = dem_strip.sample(
-                            n=min(1500, n_dem_strip), random_state=42,
-                        ) if n_dem_strip else dem_strip
-                        dem_sample = dem_sample.copy()
-                        dem_sample["y_jit"] = np.random.uniform(0, 1, len(dem_sample))
-                        com_pts = serie_strip[serie_strip["grupo"] == "Comissão"].copy()
-                        com_pts["y_jit"] = np.random.uniform(0.2, 0.8, len(com_pts))
-
-                        bg = (
-                            alt.Chart(dem_sample)
-                            .mark_circle(opacity=0.15, color="#1f77b4")
-                            .encode(
-                                x=alt.X("total:Q", title="R$ total recebido"
-                                        + (f" em {strip_ano}" if strip_ano else " (vida toda)"),
-                                        scale=alt.Scale(type="log")),
-                                y=alt.Y("y_jit:Q", title="", axis=None),
-                                tooltip=[
-                                    alt.Tooltip("nome:N"),
-                                    alt.Tooltip("total:Q", title="R$", format=",.2f"),
-                                ],
-                            )
-                        )
-                        fg = (
-                            alt.Chart(com_pts)
-                            .mark_circle(size=200, opacity=0.95, color="#d62728",
-                                         stroke="white", strokeWidth=2)
-                            .encode(
-                                x=alt.X("total:Q"),
-                                y=alt.Y("y_jit:Q"),
-                                tooltip=[
-                                    alt.Tooltip("nome:N", title="Membro"),
-                                    alt.Tooltip("total:Q", title="R$", format=",.2f"),
-                                ],
-                            )
-                        )
-                        st.altair_chart(
-                            (bg + fg).properties(height=320),
-                            use_container_width=True,
-                        )
-                        st.caption(
-                            f"🔴 Membros da comissão ({n_com_strip} pessoas) · "
-                            f"🔵 Amostra dos demais ({len(dem_sample)} de {n_dem_strip}). "
-                            f"Filtro: **{strip_ano_sel}**. "
-                            "Se os 🔴 estão concentrados na direita, é evidência visual "
-                            "da diferença de patamar."
-                        )
-
-                # Tabela de percentil + Z de cada membro (resumo da análise)
-                st.markdown("#### Percentil de cada membro na distribuição dos demais")
-                show = pct_membros[["nome", "total", "percentil", "z_log"]].copy()
-                show = show.rename(columns={
-                    "nome": "Nome", "total": "Total (R$)",
-                    "percentil": "Percentil",
-                    "z_log": "Z (log) — |Z|>2 anomalia",
-                })
-                def _hi(v):
-                    if pd.isna(v): return ""
-                    if v >= 0.99: return "background-color:#fee;color:#900;font-weight:bold"
-                    if v >= 0.95: return "background-color:#fff4e5"
+        # ── Comparativo Comissão vs Demais ─────────────────────────────────
+        st.markdown("### ⚖️ Comissão vs Demais (mediana e média por advogado)")
+        comp = com_mod.comparativo_medio(con, found_ids)
+        if not comp.empty:
+            def _highlight(val):
+                if pd.isna(val):
                     return ""
-                st.dataframe(
-                    show.style.format({
-                        "Total (R$)": "{:,.2f}",
-                        "Percentil": "{:.2%}",
-                        "Z (log) — |Z|>2 anomalia": "{:+.2f}",
-                    }).applymap(_hi, subset=["Percentil"]),
-                    use_container_width=True, hide_index=True, height=520,
+                if val >= 3.0:
+                    return "background-color: #fee; color: #900; font-weight: bold;"
+                if val >= 2.0:
+                    return "background-color: #fff4e5;"
+                return ""
+            st.dataframe(
+                comp.rename(columns={
+                    "metrica": "Métrica",
+                    "comissao_med": "Com. mediana", "comissao_avg": "Com. média",
+                    "demais_med": "Demais mediana", "demais_avg": "Demais média",
+                    "razao_med": "Razão med",
+                }).style.format({
+                    "Com. mediana": "{:,.2f}", "Com. média": "{:,.2f}",
+                    "Demais mediana": "{:,.2f}", "Demais média": "{:,.2f}",
+                    "Razão med": "{:.2f}×",
+                }).applymap(_highlight, subset=["Razão med"]),
+                use_container_width=True, hide_index=True,
+            )
+            st.caption("🔴 Razão ≥ 3× | 🟠 Razão ≥ 2× — sinais a investigar.")
+
+        # ── Ranking ────────────────────────────────────────────────────────
+        st.markdown("### 🏆 Posição no ranking geral")
+        rk = _label(com_mod.ranking_membros(con, found_ids))
+        rk["cargo"] = rk["advogado_id"].map(cargo_map).fillna("")
+        total_adv = int(con.execute(
+            "SELECT COUNT(*) FROM (SELECT DISTINCT advogado_id FROM pagamentos)"
+        ).fetchone()[0])
+        rk["posicao_label"] = rk["rk"].apply(
+            lambda n: f"#{int(n):,} / {total_adv:,}".replace(",", ".")
+        )
+        rk["top_pct"] = rk["pct_top"]
+        rk["percentil"] = 1 - rk["pct_top"]
+        rk = rk[["posicao_label", "top_pct", "percentil", "cargo", "nome", "total"]]
+        st.caption(
+            "**Como ler**: *Top X%* é onde a pessoa está na pirâmide "
+            "(0,5% = melhor que 99,5% da base). *Percentil* é a versão "
+            "complementar (98,8% = recebeu mais que 98,8% dos demais)."
+        )
+        st.dataframe(
+            rk.rename(columns={
+                "posicao_label": "Posição",
+                "top_pct": "Top X% (menor = melhor)",
+                "percentil": "Percentil (maior = melhor)",
+                "cargo": "Cargo", "nome": nome_header, "total": "Total (R$)",
+            }).style.format({
+                "Top X% (menor = melhor)": "{:.2%}",
+                "Percentil (maior = melhor)": "{:.2%}",
+                "Total (R$)": "{:,.2f}",
+            }),
+            use_container_width=True, hide_index=True, height=550,
+        )
+
+        # ── Pré × Pós cutoff ───────────────────────────────────────────────
+        st.markdown(f"### 📅 Pré × Pós {cutoff_year}")
+        pp = _label(com_mod.prepos_membros(con, found_ids, cutoff_year))
+        pp["cargo"] = pp["advogado_id"].map(cargo_map).fillna("")
+        pp = pp[["cargo", "nome", "pre", "pos", "n_pre", "n_pos", "fator"]]
+        st.dataframe(
+            pp.rename(columns={
+                "cargo": "Cargo", "nome": nome_header,
+                "pre": "Pré (R$)", "pos": "Pós (R$)",
+                "n_pre": "Pgto pré", "n_pos": "Pgto pós",
+                "fator": "Fator pós÷pré",
+            }).style.format({
+                "Pré (R$)": "{:,.2f}", "Pós (R$)": "{:,.2f}",
+                "Fator pós÷pré": lambda v: f"{v:.2f}×" if pd.notna(v) else "—",
+            }),
+            use_container_width=True, hide_index=True, height=550,
+        )
+
+        # ── Evolução temporal ──────────────────────────────────────────────
+        st.markdown("### 📈 Evolução temporal (todos juntos)")
+        evol = _label(com_mod.evolucao_temporal(con, found_ids))
+        if not evol.empty:
+            chart = (
+                alt.Chart(evol)
+                .mark_line(point=alt.OverlayMarkDef(size=50), strokeWidth=2)
+                .encode(
+                    x=alt.X("ano:O", title="Ano de pagamento"),
+                    y=alt.Y("total:Q", title="R$ no ano"),
+                    color=alt.Color("nome:N", title=nome_header,
+                                    legend=alt.Legend(orient="bottom", columns=2)),
+                    tooltip=[
+                        alt.Tooltip("nome:N", title=nome_header),
+                        alt.Tooltip("ano:O", title="Ano"),
+                        alt.Tooltip("total:Q", title="R$", format=",.2f"),
+                        alt.Tooltip("n_pgto:Q", title="Pgto"),
+                    ],
                 )
+                .properties(height=450)
+            )
+            st.altair_chart(chart, use_container_width=True)
+
+        # ── Análise estatística ─────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### 📊 Análise estatística — a Comissão está na mesma curva dos demais?")
+        st.caption(
+            "Teste formal **Mann-Whitney U** (não-paramétrico): testa se as "
+            "distribuições de valor total recebido têm forma/local compatíveis "
+            "ou são distintas estatisticamente."
+        )
+
+        mw = com_mod.mann_whitney_u(con, found_ids)
+        if mw["p"] < 0.001:
+            veredito = "🔴 Diferença EXTREMAMENTE significativa"
+        elif mw["p"] < 0.01:
+            veredito = "🟠 Diferença muito significativa"
+        elif mw["p"] < 0.05:
+            veredito = "🟡 Diferença significativa"
+        else:
+            veredito = "🟢 Sem evidência de diferença"
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("p-value (Mann-Whitney U)", f"{mw['p']:.2e}",
+                  help="p<0.05 = significativo.")
+        k2.metric("Z-statistic", f"{mw['Z']:+.2f}")
+        k3.metric("Prob. de superioridade", f"{mw['prob_sup']:.1%}",
+                  help="Chance de um membro escolhido aleatoriamente receber MAIS "
+                       "que um advogado aleatório dos demais. 50% = igual.")
+        k4.metric("Veredito",
+                  veredito.split(" ", 1)[0],
+                  veredito.split(" ", 1)[1] if " " in veredito else "")
+
+        st.markdown("#### Estatísticas descritivas")
+        desc = com_mod.estatisticas_descritivas(con, found_ids)
+        st.dataframe(
+            desc.rename(columns={
+                "grupo": "Grupo", "n": "N",
+                "media": "Média", "desvio": "Desvio-padrão",
+                "min": "Mínimo", "p25": "P25", "p50": "Mediana (P50)",
+                "p75": "P75", "p90": "P90", "p95": "P95", "p99": "P99",
+                "max": "Máximo",
+            }).style.format({
+                c: "{:,.2f}" for c in
+                ["Média", "Desvio-padrão", "Mínimo", "P25", "Mediana (P50)",
+                 "P75", "P90", "P95", "P99", "Máximo"]
+            }),
+            use_container_width=True, hide_index=True,
+        )
+
+        # 4 gráficos
+        serie = com_mod.serie_por_grupo(con, found_ids)
+        hist  = com_mod.histograma_buckets(con, found_ids)
+        cdf   = com_mod.cdf_data(con, found_ids)
+        pct_membros = com_mod.percentil_de_cada_membro(con, found_ids)
+        pct_membros = _label(pct_membros)
+
+        COLOR_SCALE = alt.Scale(
+            domain=["Comissão", "Demais"],
+            range=["#d62728", "#1f77b4"],
+        )
+
+        g1, g2 = st.columns(2)
+        with g1:
+            st.markdown("**Boxplot — log-scale**")
+            chart_box = (
+                alt.Chart(serie)
+                .mark_boxplot(size=60, extent="min-max")
+                .encode(
+                    x=alt.X("grupo:N", title=""),
+                    y=alt.Y("total:Q", title="R$ total recebido",
+                            scale=alt.Scale(type="log")),
+                    color=alt.Color("grupo:N", scale=COLOR_SCALE, legend=None),
+                )
+                .properties(height=320)
+            )
+            st.altair_chart(chart_box, use_container_width=True)
+            st.caption(
+                "Se as caixas não se sobrepõem, as distribuições são "
+                "claramente distintas."
+            )
+
+        with g2:
+            st.markdown("**Histograma (% por bucket)**")
+            chart_hist = (
+                alt.Chart(hist)
+                .mark_bar(opacity=0.75)
+                .encode(
+                    x=alt.X("bucket:N", title="Faixa de R$",
+                            sort=["< 1k","1-5k","5-10k","10-25k","25-50k",
+                                  "50-100k","100-200k","200-500k","500k-1M","> 1M"]),
+                    y=alt.Y("pct:Q", title="% dos advogados do grupo",
+                            axis=alt.Axis(format=".0%")),
+                    color=alt.Color("grupo:N", scale=COLOR_SCALE,
+                                    legend=alt.Legend(orient="top")),
+                    xOffset="grupo:N",
+                    tooltip=[
+                        alt.Tooltip("grupo:N"),
+                        alt.Tooltip("bucket:N", title="Faixa"),
+                        alt.Tooltip("n:Q", title="N advogados"),
+                        alt.Tooltip("pct:Q", title="% do grupo", format=".1%"),
+                    ],
+                )
+                .properties(height=320)
+            )
+            st.altair_chart(chart_hist, use_container_width=True)
+            st.caption(
+                "Bimodalidade da Comissão = poucos no meio (massa em "
+                "50k-200k, e um pequeno grupo em 1-5k)."
+            )
+
+        g3, g4 = st.columns(2)
+        with g3:
+            st.markdown("**CDF — % acumulada que ficam abaixo de X**")
+            chart_cdf = (
+                alt.Chart(cdf)
+                .mark_line(strokeWidth=2.5)
+                .encode(
+                    x=alt.X("total:Q", title="R$ total recebido",
+                            scale=alt.Scale(type="log")),
+                    y=alt.Y("cdf:Q", title="% acumulada",
+                            axis=alt.Axis(format=".0%")),
+                    color=alt.Color("grupo:N", scale=COLOR_SCALE,
+                                    legend=alt.Legend(orient="top")),
+                    tooltip=[
+                        "grupo:N",
+                        alt.Tooltip("total:Q", title="R$", format=",.2f"),
+                        alt.Tooltip("cdf:Q", title="% até aqui", format=".1%"),
+                    ],
+                )
+                .properties(height=320)
+            )
+            st.altair_chart(chart_cdf, use_container_width=True)
+            st.caption(
+                "Curvas separadas = Comissão tem cauda muito mais 'à direita'."
+            )
+
+        with g4:
+            st.markdown("**Posição de cada membro (R$ em log)**")
+            anos_strip = [int(r[0]) for r in con.execute(
+                "SELECT DISTINCT ano FROM pagamentos ORDER BY ano"
+            ).fetchall()]
+            strip_ano_sel = st.selectbox(
+                "Filtrar por ano de pagamento",
+                options=["Vida toda (todos os anos)"] + anos_strip,
+                index=0, key="strip_ano_sel",
+            )
+            strip_ano = None if strip_ano_sel == "Vida toda (todos os anos)" else int(strip_ano_sel)
+            serie_strip = com_mod.serie_por_grupo(con, found_ids, ano=strip_ano)
+            # Anexa rótulo (nome ou ADV_id) para tooltip
+            if PRIVATE:
+                names = adv_idx[["advogado_id", "nome"]]
+                serie_strip = serie_strip.merge(names, on="advogado_id", how="left")
+                serie_strip["nome"] = serie_strip["nome"].fillna(serie_strip["advogado_id"])
+            else:
+                serie_strip["nome"] = serie_strip["advogado_id"]
+
+            n_com_strip = int((serie_strip["grupo"] == "Comissão").sum())
+            n_dem_strip = int((serie_strip["grupo"] == "Demais").sum())
+            if n_com_strip == 0:
+                st.warning(
+                    f"Nenhum membro da comissão recebeu em {strip_ano_sel}. "
+                    "Nada para plotar."
+                )
+            else:
+                dem_strip = serie_strip[serie_strip["grupo"] == "Demais"]
+                dem_sample = dem_strip.sample(
+                    n=min(1500, n_dem_strip), random_state=42,
+                ) if n_dem_strip else dem_strip
+                dem_sample = dem_sample.copy()
+                dem_sample["y_jit"] = np.random.uniform(0, 1, len(dem_sample))
+                com_pts = serie_strip[serie_strip["grupo"] == "Comissão"].copy()
+                com_pts["y_jit"] = np.random.uniform(0.2, 0.8, len(com_pts))
+
+                bg = (
+                    alt.Chart(dem_sample)
+                    .mark_circle(opacity=0.15, color="#1f77b4")
+                    .encode(
+                        x=alt.X("total:Q",
+                                title="R$ total recebido"
+                                + (f" em {strip_ano}" if strip_ano else " (vida toda)"),
+                                scale=alt.Scale(type="log")),
+                        y=alt.Y("y_jit:Q", title="", axis=None),
+                        tooltip=[
+                            alt.Tooltip("nome:N"),
+                            alt.Tooltip("total:Q", title="R$", format=",.2f"),
+                        ],
+                    )
+                )
+                fg = (
+                    alt.Chart(com_pts)
+                    .mark_circle(size=200, opacity=0.95, color="#d62728",
+                                 stroke="white", strokeWidth=2)
+                    .encode(
+                        x=alt.X("total:Q"),
+                        y=alt.Y("y_jit:Q"),
+                        tooltip=[
+                            alt.Tooltip("nome:N", title="Membro"),
+                            alt.Tooltip("total:Q", title="R$", format=",.2f"),
+                        ],
+                    )
+                )
+                st.altair_chart(
+                    (bg + fg).properties(height=320), use_container_width=True
+                )
+                st.caption(
+                    f"🔴 Membros ({n_com_strip}) · 🔵 Amostra dos demais "
+                    f"({len(dem_sample)}/{n_dem_strip}). Filtro: **{strip_ano_sel}**."
+                )
+
+        st.markdown("#### Percentil de cada membro na distribuição dos demais")
+        show = pct_membros[["nome", "total", "percentil", "z_log"]].copy()
+        show = show.rename(columns={
+            "nome": nome_header, "total": "Total (R$)",
+            "percentil": "Percentil",
+            "z_log": "Z (log) — |Z|>2 anomalia",
+        })
+        def _hi(v):
+            if pd.isna(v): return ""
+            if v >= 0.99: return "background-color:#fee;color:#900;font-weight:bold"
+            if v >= 0.95: return "background-color:#fff4e5"
+            return ""
+        st.dataframe(
+            show.style.format({
+                "Total (R$)": "{:,.2f}",
+                "Percentil": "{:.2%}",
+                "Z (log) — |Z|>2 anomalia": "{:+.2f}",
+            }).applymap(_hi, subset=["Percentil"]),
+            use_container_width=True, hide_index=True, height=520,
+        )
 
 
 # ===== RECONCILIAÇÃO ====================================================
