@@ -173,6 +173,7 @@ tabs = st.tabs([
     "🏆 Ranking",
     "🔍 Distorções",
     "👤 Drill-down",
+    "📈 Comparar 5",
     "🗺️ Geografia",
     "⏱️ Tempo até pagamento",
     "📅 Antes × Depois Lista",
@@ -444,8 +445,182 @@ with tabs[3]:
         )
 
 
-# ===== GEOGRAFIA =========================================================
+# ===== COMPARAR 5 ========================================================
 with tabs[4]:
+    st.subheader("Comparativo lado a lado (até 5 advogados)")
+    st.caption(
+        "Selecione até 5 advogados na caixa abaixo. Os gráficos mostram a "
+        "evolução do total pago por **ano do pagamento** e por **ano do processo (CNJ)**. "
+        "Os filtros globais da sidebar **não** se aplicam aqui — esta aba sempre "
+        "olha a série histórica completa de cada advogado selecionado."
+    )
+
+    if PRIVATE:
+        # label = "Nome · ADV_xxxxxxxxxxxx" (search-friendly)
+        opcoes_comp = sorted(
+            adv_idx.apply(
+                lambda r: f"{r['nome']}  ·  {r['advogado_id']}", axis=1
+            ).tolist()
+        )
+    else:
+        opcoes_comp = sorted(adv_idx["advogado_id"].tolist())
+
+    selected_labels = st.multiselect(
+        "Selecione até 5 advogados (digite parte do nome para filtrar)",
+        options=opcoes_comp,
+        max_selections=5,
+        key="comparar_5_select",
+    )
+
+    if not selected_labels:
+        st.info("Selecione 1 a 5 advogados para ver a comparação.")
+    else:
+        selected_ids = [
+            (lbl.rsplit("·", 1)[-1].strip() if "·" in lbl else lbl)
+            for lbl in selected_labels
+        ]
+        placeholders = ",".join(f"'{aid}'" for aid in selected_ids)
+
+        # Pagamentos agregados por ano DE PAGAMENTO
+        df_pag = con.execute(f"""
+            SELECT advogado_id, ano,
+                   SUM(valor_bruto) AS total,
+                   COUNT(*) AS n
+            FROM pagamentos
+            WHERE advogado_id IN ({placeholders})
+            GROUP BY advogado_id, ano
+            ORDER BY advogado_id, ano
+        """).df()
+
+        # Pagamentos agregados por ano DO PROCESSO (CNJ)
+        df_proc = con.execute(f"""
+            SELECT advogado_id, ano_processo AS ano,
+                   SUM(valor_bruto) AS total,
+                   COUNT(*) AS n
+            FROM pagamentos
+            WHERE advogado_id IN ({placeholders}) AND ano_processo IS NOT NULL
+            GROUP BY advogado_id, ano_processo
+            ORDER BY advogado_id, ano_processo
+        """).df()
+
+        # Build a friendly label per advogado (Nome (ADV_xxxxxxx) or just ADV_)
+        if PRIVATE:
+            names_lookup = adv_idx.set_index("advogado_id")["nome"].to_dict()
+            label_of = {
+                aid: f"{names_lookup.get(aid, '?')}  ({aid[:11]}…)"
+                for aid in selected_ids
+            }
+        else:
+            label_of = {aid: aid for aid in selected_ids}
+        df_pag["advogado"] = df_pag["advogado_id"].map(label_of)
+        df_proc["advogado"] = df_proc["advogado_id"].map(label_of)
+
+        # Side-by-side metric strip
+        cols = st.columns(len(selected_ids))
+        for col, aid in zip(cols, selected_ids):
+            sub = df_pag[df_pag["advogado_id"] == aid]
+            tot = sub["total"].sum() if not sub.empty else 0.0
+            n = int(sub["n"].sum()) if not sub.empty else 0
+            label = label_of[aid]
+            col.metric(
+                label[:30] + ("…" if len(label) > 30 else ""),
+                fmt_brl(tot),
+                f"{fmt_int(n)} pgto",
+            )
+
+        st.markdown("### 💰 Evolução por **ano de pagamento**")
+        if df_pag.empty:
+            st.info("Sem pagamentos para os advogados selecionados.")
+        else:
+            chart_pag = (
+                alt.Chart(df_pag)
+                .mark_line(point=alt.OverlayMarkDef(size=80), strokeWidth=2.5)
+                .encode(
+                    x=alt.X("ano:O", title="Ano do pagamento"),
+                    y=alt.Y("total:Q", title="R$ total no ano"),
+                    color=alt.Color("advogado:N", title="Advogado",
+                                    legend=alt.Legend(orient="bottom", columns=2)),
+                    tooltip=[
+                        alt.Tooltip("advogado:N", title="Advogado"),
+                        alt.Tooltip("ano:O", title="Ano"),
+                        alt.Tooltip("total:Q", title="Total (R$)", format=",.2f"),
+                        alt.Tooltip("n:Q", title="Pagamentos"),
+                    ],
+                )
+                .properties(height=420)
+            )
+            st.altair_chart(chart_pag, use_container_width=True)
+
+        st.markdown("### ⚖️ Volume por **ano do processo (CNJ)**")
+        st.caption(
+            "Este é o ano de **distribuição** do processo (extraído do número CNJ), "
+            "não o ano do pagamento. Mostra de quais 'safras' de processos cada "
+            "advogado vem recebendo."
+        )
+        if df_proc.empty:
+            st.info("Nenhum dos selecionados tem processos com CNJ parseável.")
+        else:
+            chart_proc = (
+                alt.Chart(df_proc)
+                .mark_line(point=alt.OverlayMarkDef(size=80), strokeWidth=2.5)
+                .encode(
+                    x=alt.X("ano:O", title="Ano de distribuição do processo"),
+                    y=alt.Y("total:Q", title="R$ total recebido por processos desse ano"),
+                    color=alt.Color("advogado:N", title="Advogado",
+                                    legend=alt.Legend(orient="bottom", columns=2)),
+                    tooltip=[
+                        alt.Tooltip("advogado:N", title="Advogado"),
+                        alt.Tooltip("ano:O", title="Ano do processo"),
+                        alt.Tooltip("total:Q", title="Total (R$)", format=",.2f"),
+                        alt.Tooltip("n:Q", title="Pagamentos"),
+                    ],
+                )
+                .properties(height=420)
+            )
+            st.altair_chart(chart_proc, use_container_width=True)
+
+        st.markdown("### 📋 Resumo lado a lado")
+        resumo = con.execute(f"""
+            SELECT advogado_id,
+                   COUNT(*) AS n_pgto,
+                   SUM(valor_bruto) AS total,
+                   AVG(valor_bruto) AS ticket,
+                   COUNT(DISTINCT processo) AS n_proc,
+                   COUNT(DISTINCT comarca) AS n_com,
+                   MIN(ano) AS pgto_primeiro,
+                   MAX(ano) AS pgto_ultimo,
+                   MIN(ano_processo) AS proc_primeiro,
+                   MAX(ano_processo) AS proc_ultimo,
+                   AVG(CASE WHEN ano_processo IS NOT NULL
+                            THEN ano - ano_processo END) AS anos_medio_pgto
+            FROM pagamentos
+            WHERE advogado_id IN ({placeholders})
+            GROUP BY advogado_id
+        """).df()
+        resumo["advogado"] = resumo["advogado_id"].map(label_of)
+        ordered_cols = [
+            "advogado", "n_pgto", "total", "ticket", "n_proc", "n_com",
+            "pgto_primeiro", "pgto_ultimo", "proc_primeiro", "proc_ultimo",
+            "anos_medio_pgto",
+        ]
+        st.dataframe(
+            resumo[ordered_cols].rename(columns={
+                "advogado": "Advogado", "n_pgto": "Pagamentos",
+                "total": "Total (R$)", "ticket": "Ticket médio (R$)",
+                "n_proc": "Processos", "n_com": "Comarcas",
+                "pgto_primeiro": "1º pgto (ano)", "pgto_ultimo": "Último pgto",
+                "proc_primeiro": "Proc + antigo", "proc_ultimo": "Proc + novo",
+                "anos_medio_pgto": "Anos médios até pgto",
+            }).style.format({
+                "Total (R$)": "{:,.2f}", "Ticket médio (R$)": "{:,.2f}",
+                "Anos médios até pgto": "{:.2f}",
+            }),
+            use_container_width=True, hide_index=True,
+        )
+
+
+# ===== GEOGRAFIA =========================================================
+with tabs[5]:
     st.subheader("Distribuição por comarca")
     where = _where_filtros("comarca IS NOT NULL")
     by_com = con.execute(f"""
@@ -480,7 +655,7 @@ with tabs[4]:
 
 
 # ===== TEMPO ATÉ PAGAMENTO ==============================================
-with tabs[5]:
+with tabs[6]:
     st.subheader("Tempo entre distribuição do processo e o pagamento")
     st.caption(
         "Diferença entre o **ano do pagamento** e o **ano do processo** "
@@ -575,7 +750,7 @@ with tabs[5]:
 
 
 # ===== ANTES × DEPOIS LISTA =============================================
-with tabs[6]:
+with tabs[7]:
     st.subheader(f"Comparação antes × depois de {cutoff_year}")
     st.caption(
         f"Marco temporal: **{cutoff_year}**. Pré = pagamentos com `ano < {cutoff_year}`; "
@@ -631,7 +806,7 @@ with tabs[6]:
 
 
 # ===== RECONCILIAÇÃO ====================================================
-with tabs[7]:
+with tabs[8]:
     st.markdown(
         "Comparação entre a fonte detalhada (transparencia.es.gov.br) e a "
         "fonte agregada da PGE-ES (CKAN)."
@@ -669,7 +844,7 @@ with tabs[7]:
 
 
 # ===== SOBRE =============================================================
-with tabs[8]:
+with tabs[9]:
     st.markdown(f"""
 ### Como este BIZÃO foi feito
 
