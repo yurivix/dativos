@@ -14,7 +14,7 @@ import duckdb
 import pandas as pd
 import streamlit as st
 
-from analysis import distortions as dist
+from analysis import comissao as com_mod, distortions as dist
 
 ROOT = Path(__file__).resolve().parent
 
@@ -177,6 +177,7 @@ tabs = st.tabs([
     "🗺️ Geografia",
     "⏱️ Tempo até pagamento",
     "📅 Antes × Depois Lista",
+    "🏛️ Comissão",
     "🔗 Reconciliação",
     "ℹ️ Sobre",
 ])
@@ -805,8 +806,198 @@ with tabs[7]:
     )
 
 
-# ===== RECONCILIAÇÃO ====================================================
+# ===== COMISSÃO =========================================================
 with tabs[8]:
+    st.subheader("Análise da Comissão de Dativos")
+    st.caption(
+        "Compara membros da comissão (você pode editar a lista abaixo) contra "
+        "o restante dos advogados na base. Útil para identificar padrões "
+        "atípicos de pagamentos a quem fiscaliza o sistema."
+    )
+
+    if not PRIVATE:
+        st.warning(
+            "Esta aba só funciona em **modo privado** (com nomes reais). "
+            "O matching de nomes é necessário para vincular aos `advogado_id`. "
+            "Rode local com `streamlit run app.py` quando o `dativos_full.duckdb` existir."
+        )
+    else:
+        st.markdown("**Membros da comissão** (edite cargos/nomes se necessário):")
+        # Editable list — defaults to the pre-configured 17 members
+        default_df = pd.DataFrame(
+            com_mod.COMISSAO_DEFAULT, columns=["Cargo", "Nome"]
+        )
+        edited = st.data_editor(
+            default_df,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="comissao_editor",
+            column_config={
+                "Cargo": st.column_config.TextColumn(width="medium"),
+                "Nome": st.column_config.TextColumn(width="large"),
+            },
+        )
+
+        # Filter out empty rows
+        edited = edited.dropna(how="all")
+        edited = edited[edited["Nome"].astype(str).str.strip() != ""]
+        members = list(zip(edited["Cargo"].fillna("").tolist(),
+                           edited["Nome"].astype(str).tolist()))
+
+        if not members:
+            st.info("Adicione ao menos um nome para rodar a análise.")
+        else:
+            # ── Matching ──────────────────────────────────────────────
+            matches = com_mod.match_members(con, members)
+            n_exato = sum(1 for m in matches if m.method == "exato")
+            n_fuzzy = sum(1 for m in matches if m.method == "fuzzy")
+            n_nf    = sum(1 for m in matches if m.method == "nao_encontrado")
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total", len(matches))
+            c2.metric("Match exato", n_exato)
+            c3.metric("Match fuzzy", n_fuzzy)
+            c4.metric("Não encontrados", n_nf)
+
+            with st.expander("🔎 Detalhe do matching", expanded=(n_fuzzy + n_nf > 0)):
+                match_df = pd.DataFrame([{
+                    "Cargo": m.cargo,
+                    "Nome informado": m.nome_input,
+                    "Nome na base": m.nome_matched or "—",
+                    "Método": m.method,
+                    "ADV_id": m.advogado_id or "—",
+                } for m in matches])
+                st.dataframe(match_df, use_container_width=True, hide_index=True)
+
+            found_ids = [m.advogado_id for m in matches if m.advogado_id]
+
+            if not found_ids:
+                st.error("Nenhum nome casou com a base.")
+            else:
+                # ── Métricas por membro ──────────────────────────────
+                st.markdown("### 💰 Métricas por membro")
+                df_membros = com_mod.metricas_por_membro(con, found_ids)
+                # join cargo
+                cargo_map = {m.advogado_id: m.cargo for m in matches if m.advogado_id}
+                df_membros["cargo"] = df_membros["advogado_id"].map(cargo_map)
+                df_membros = df_membros[[
+                    "cargo", "nome", "n_pgto", "total", "ticket", "n_proc",
+                    "n_com", "pgto_min", "pgto_max", "anos_medio",
+                ]]
+                st.dataframe(
+                    df_membros.rename(columns={
+                        "cargo": "Cargo", "nome": "Nome",
+                        "n_pgto": "Pgto", "total": "Total (R$)",
+                        "ticket": "Ticket (R$)", "n_proc": "Processos",
+                        "n_com": "Comarcas",
+                        "pgto_min": "1º pgto", "pgto_max": "Último pgto",
+                        "anos_medio": "Anos médios até pgto",
+                    }).style.format({
+                        "Total (R$)": "{:,.2f}", "Ticket (R$)": "{:,.2f}",
+                        "Anos médios até pgto": "{:.2f}",
+                    }),
+                    use_container_width=True, hide_index=True, height=550,
+                )
+
+                total_com = df_membros["total"].sum()
+                st.caption(
+                    f"Total recebido pelos {len(found_ids)} membros encontrados: "
+                    f"**{fmt_brl(total_com)}**"
+                )
+
+                # ── Comparativo Comissão vs Demais ───────────────────
+                st.markdown("### ⚖️ Comissão vs Demais (mediana e média por advogado)")
+                comp = com_mod.comparativo_medio(con, found_ids)
+                if not comp.empty:
+                    # Highlight ratio
+                    def _highlight(val):
+                        if pd.isna(val):
+                            return ""
+                        if val >= 3.0:
+                            return "background-color: #fee; color: #900; font-weight: bold;"
+                        if val >= 2.0:
+                            return "background-color: #fff4e5;"
+                        return ""
+
+                    st.dataframe(
+                        comp.rename(columns={
+                            "metrica": "Métrica",
+                            "comissao_med": "Com. mediana",
+                            "comissao_avg": "Com. média",
+                            "demais_med": "Demais mediana",
+                            "demais_avg": "Demais média",
+                            "razao_med": "Razão med",
+                        }).style.format({
+                            "Com. mediana": "{:,.2f}", "Com. média": "{:,.2f}",
+                            "Demais mediana": "{:,.2f}", "Demais média": "{:,.2f}",
+                            "Razão med": "{:.2f}×",
+                        }).applymap(_highlight, subset=["Razão med"]),
+                        use_container_width=True, hide_index=True,
+                    )
+                    st.caption(
+                        "🔴 Razão ≥ 3× | 🟠 Razão ≥ 2× — sinais a investigar."
+                    )
+
+                # ── Ranking ────────────────────────────────────────────
+                st.markdown("### 🏆 Posição no ranking geral")
+                rk = com_mod.ranking_membros(con, found_ids)
+                rk["cargo"] = rk["advogado_id"].map(cargo_map)
+                rk = rk[["rk", "pct_top", "cargo", "nome", "total"]]
+                st.dataframe(
+                    rk.rename(columns={
+                        "rk": "Posição", "pct_top": "% do topo",
+                        "cargo": "Cargo", "nome": "Nome", "total": "Total (R$)",
+                    }).style.format({
+                        "% do topo": "{:.2%}",
+                        "Total (R$)": "{:,.2f}",
+                    }),
+                    use_container_width=True, hide_index=True, height=550,
+                )
+
+                # ── Pré × Pós cutoff ─────────────────────────────────
+                st.markdown(f"### 📅 Pré × Pós {cutoff_year}")
+                pp = com_mod.prepos_membros(con, found_ids, cutoff_year)
+                pp["cargo"] = pp["advogado_id"].map(cargo_map)
+                pp = pp[["cargo", "nome", "pre", "pos", "n_pre", "n_pos", "fator"]]
+                st.dataframe(
+                    pp.rename(columns={
+                        "cargo": "Cargo", "nome": "Nome",
+                        "pre": "Pré (R$)", "pos": "Pós (R$)",
+                        "n_pre": "Pgto pré", "n_pos": "Pgto pós",
+                        "fator": "Fator pós÷pré",
+                    }).style.format({
+                        "Pré (R$)": "{:,.2f}", "Pós (R$)": "{:,.2f}",
+                        "Fator pós÷pré": lambda v: f"{v:.2f}×" if pd.notna(v) else "—",
+                    }),
+                    use_container_width=True, hide_index=True, height=550,
+                )
+
+                # ── Evolução temporal ────────────────────────────────
+                st.markdown("### 📈 Evolução temporal (todos juntos)")
+                evol = com_mod.evolucao_temporal(con, found_ids)
+                if not evol.empty:
+                    chart = (
+                        alt.Chart(evol)
+                        .mark_line(point=alt.OverlayMarkDef(size=50), strokeWidth=2)
+                        .encode(
+                            x=alt.X("ano:O", title="Ano de pagamento"),
+                            y=alt.Y("total:Q", title="R$ no ano"),
+                            color=alt.Color("nome:N", title="Membro",
+                                            legend=alt.Legend(orient="bottom", columns=2)),
+                            tooltip=[
+                                alt.Tooltip("nome:N", title="Membro"),
+                                alt.Tooltip("ano:O", title="Ano"),
+                                alt.Tooltip("total:Q", title="R$", format=",.2f"),
+                                alt.Tooltip("n_pgto:Q", title="Pgto"),
+                            ],
+                        )
+                        .properties(height=450)
+                    )
+                    st.altair_chart(chart, use_container_width=True)
+
+
+# ===== RECONCILIAÇÃO ====================================================
+with tabs[9]:
     st.markdown(
         "Comparação entre a fonte detalhada (transparencia.es.gov.br) e a "
         "fonte agregada da PGE-ES (CKAN)."
@@ -844,7 +1035,7 @@ with tabs[8]:
 
 
 # ===== SOBRE =============================================================
-with tabs[9]:
+with tabs[10]:
     st.markdown(f"""
 ### Como este BIZÃO foi feito
 
