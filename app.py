@@ -942,13 +942,34 @@ with tabs[8]:
                 st.markdown("### 🏆 Posição no ranking geral")
                 rk = com_mod.ranking_membros(con, found_ids)
                 rk["cargo"] = rk["advogado_id"].map(cargo_map)
-                rk = rk[["rk", "pct_top", "cargo", "nome", "total"]]
+                # Build clearer columns:
+                #   - "Posição" = N/total (e.g. "30 / 8.283")
+                #   - "Top X%" = quão alto na pirâmide (menor = melhor)
+                #   - "Percentil" = inverso, alto = melhor (98,79% = recebeu mais que 98,79% dos demais)
+                total_adv = int(con.execute(
+                    "SELECT COUNT(*) FROM (SELECT DISTINCT advogado_id FROM pagamentos)"
+                ).fetchone()[0])
+                rk["posicao_label"] = rk["rk"].apply(
+                    lambda n: f"#{int(n):,} / {total_adv:,}".replace(",", ".")
+                )
+                rk["top_pct"] = rk["pct_top"]            # menor = melhor (top 1% = 0,01)
+                rk["percentil"] = 1 - rk["pct_top"]      # maior = melhor (98,79%)
+                rk = rk[["posicao_label", "top_pct", "percentil", "cargo", "nome", "total"]]
+                st.caption(
+                    "**Como ler**: *Top X%* é onde a pessoa está na pirâmide "
+                    "(0,5% = melhor que 99,5% da base). *Percentil* é a "
+                    "versão complementar (98,8% = recebeu mais que 98,8% dos demais). "
+                    "São a mesma informação, formatos diferentes."
+                )
                 st.dataframe(
                     rk.rename(columns={
-                        "rk": "Posição", "pct_top": "% do topo",
+                        "posicao_label": "Posição",
+                        "top_pct": "Top X% (menor = melhor)",
+                        "percentil": "Percentil (maior = melhor)",
                         "cargo": "Cargo", "nome": "Nome", "total": "Total (R$)",
                     }).style.format({
-                        "% do topo": "{:.2%}",
+                        "Top X% (menor = melhor)": "{:.2%}",
+                        "Percentil (maior = melhor)": "{:.2%}",
                         "Total (R$)": "{:,.2f}",
                     }),
                     use_container_width=True, hide_index=True, height=550,
