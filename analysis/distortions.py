@@ -78,6 +78,69 @@ def concentracao_pareto(
     """).df()
 
 
+def pareto_curve(
+    con: duckdb.DuckDBPyConnection,
+    ano: int | None = None,
+    advogado_id: str | None = None,
+    max_points: int = 500,
+) -> pd.DataFrame:
+    """Curva de Pareto: posição (rank) vs % acumulado do total.
+
+    Retorna DataFrame com (rank, rank_pct, total_acum, pct_acum). Sub-amostrado
+    para no máximo `max_points` linhas (mantém início e cauda).
+    """
+    df = con.execute(f"""
+        SELECT advogado_id, SUM(valor_bruto) AS v
+        FROM pagamentos {_where(ano, advogado_id)}
+        GROUP BY advogado_id
+        ORDER BY v DESC
+    """).df()
+    if df.empty:
+        return df
+    df["rank"] = range(1, len(df) + 1)
+    total = df["v"].sum()
+    df["total_acum"] = df["v"].cumsum()
+    df["pct_acum"] = df["total_acum"] / total
+    df["rank_pct"] = df["rank"] / len(df)
+    # Sub-amostragem: preserva os 100 primeiros e amostra o resto
+    if len(df) > max_points:
+        head = df.iloc[:100]
+        tail = df.iloc[100:].iloc[::max(1, (len(df) - 100) // (max_points - 100))]
+        df = pd.concat([head, tail], ignore_index=True)
+    return df[["rank", "rank_pct", "v", "total_acum", "pct_acum"]]
+
+
+def lorenz_curve(
+    con: duckdb.DuckDBPyConnection,
+    ano: int | None = None,
+    advogado_id: str | None = None,
+    max_points: int = 500,
+) -> pd.DataFrame:
+    """Curva de Lorenz: % cumulativo da população (ascendente) vs % do total.
+
+    Diagonal (45°) = igualdade perfeita. Quanto mais a curva afunda abaixo da
+    diagonal, maior a desigualdade. A área entre a diagonal e a curva é
+    proporcional ao coeficiente de Gini.
+    """
+    df = con.execute(f"""
+        SELECT SUM(valor_bruto) AS v
+        FROM pagamentos {_where(ano, advogado_id)}
+        GROUP BY advogado_id
+        ORDER BY v ASC
+    """).df()
+    if df.empty:
+        return df
+    n = len(df)
+    total = df["v"].sum()
+    df["pop_pct"] = pd.Series(range(1, n + 1)) / n
+    df["valor_pct"] = df["v"].cumsum() / total
+    if n > max_points:
+        df = df.iloc[:: max(1, n // max_points)]
+    # Garantir início em (0,0)
+    head = pd.DataFrame([{"v": 0, "pop_pct": 0.0, "valor_pct": 0.0}])
+    return pd.concat([head, df[["v", "pop_pct", "valor_pct"]]], ignore_index=True)
+
+
 def gini(
     con: duckdb.DuckDBPyConnection,
     ano: int | None = None,

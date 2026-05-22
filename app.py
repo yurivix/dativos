@@ -89,13 +89,21 @@ def load_advogados_index() -> pd.DataFrame:
 
 @st.cache_data(ttl=3600)
 def load_comissao_index() -> pd.DataFrame:
-    """ADV_ids da comissão (com cargo). Existe em ambos os DBs."""
+    """ADV_ids da comissão. Existe em ambos os DBs.
+
+    Em modo público (anonimizado), o cargo é colapsado para "Membro" — basta
+    saber QUE é da comissão, não qual o papel. Em modo privado mantém o cargo
+    real (Presidente / Vice / Secretário / Membro).
+    """
     try:
-        return get_conn().execute(
+        df = get_conn().execute(
             "SELECT advogado_id, cargo, ordem FROM comissao ORDER BY ordem"
         ).df()
     except Exception:
         return pd.DataFrame(columns=["advogado_id", "cargo", "ordem"])
+    if not PRIVATE:
+        df["cargo"] = "Membro"
+    return df
 
 
 def attach_name(df: pd.DataFrame, id_col: str = "advogado_id") -> pd.DataFrame:
@@ -353,7 +361,70 @@ with tabs[2]:
         c2.metric("Top 10 capturam",
                   f"{top10_pct.iloc[0]:.1%}" if not top10_pct.empty else "—")
 
-    st.subheader("Pareto — concentração no topo")
+    # ── Pareto + Lorenz lado a lado ─────────────────────────────────────
+    pg1, pg2 = st.columns(2)
+
+    with pg1:
+        st.subheader("📈 Curva de Pareto")
+        pareto_full = dist.pareto_curve(con, ano=ano_filtro, advogado_id=adv_filtro)
+        if not pareto_full.empty:
+            chart_par = (
+                alt.Chart(pareto_full)
+                .mark_line(strokeWidth=2.5, color="#1f77b4")
+                .encode(
+                    x=alt.X("rank:Q", title="Posição no ranking (rank)"),
+                    y=alt.Y("pct_acum:Q", title="% acumulado do total",
+                            axis=alt.Axis(format=".0%")),
+                    tooltip=[
+                        alt.Tooltip("rank:Q", title="Rank"),
+                        alt.Tooltip("pct_acum:Q", title="% do total", format=".2%"),
+                        alt.Tooltip("total_acum:Q", title="R$ acumulado", format=",.2f"),
+                    ],
+                )
+                .properties(height=320)
+            )
+            st.altair_chart(chart_par, use_container_width=True)
+            st.caption(
+                "Mostra quanto do total cabe nos top N advogados. Curva mais "
+                "vertical no início = mais concentração no topo."
+            )
+
+    with pg2:
+        st.subheader("📉 Curva de Lorenz")
+        lorenz = dist.lorenz_curve(con, ano=ano_filtro, advogado_id=adv_filtro)
+        if not lorenz.empty:
+            # Diagonal de igualdade
+            diag = pd.DataFrame({"pop_pct": [0, 1], "valor_pct": [0, 1]})
+            line_diag = (
+                alt.Chart(diag)
+                .mark_line(strokeDash=[6, 4], color="#888", strokeWidth=1.5)
+                .encode(x="pop_pct:Q", y="valor_pct:Q")
+            )
+            line_lor = (
+                alt.Chart(lorenz)
+                .mark_line(strokeWidth=2.5, color="#d62728")
+                .encode(
+                    x=alt.X("pop_pct:Q", title="% acumulado da população (do menor pro maior)",
+                            axis=alt.Axis(format=".0%")),
+                    y=alt.Y("valor_pct:Q", title="% acumulado do valor",
+                            axis=alt.Axis(format=".0%")),
+                    tooltip=[
+                        alt.Tooltip("pop_pct:Q", title="% pop.", format=".1%"),
+                        alt.Tooltip("valor_pct:Q", title="% valor", format=".1%"),
+                    ],
+                )
+            )
+            st.altair_chart(
+                (line_diag + line_lor).properties(height=320),
+                use_container_width=True,
+            )
+            st.caption(
+                f"Linha diagonal cinza = igualdade perfeita. Curva vermelha "
+                f"afunda = desigualdade. A 'barriga' entre as duas é "
+                f"proporcional ao Gini (= {g:.3f})."
+            )
+
+    st.subheader("Pareto — tabela resumo")
     if not pareto.empty:
         st.dataframe(
             pareto.assign(pct=lambda d: (d["pct"] * 100).round(2))
@@ -366,6 +437,26 @@ with tabs[2]:
         min_com = st.slider("Mínimo de comarcas", 3, 30, 5, key="disp_geo")
         df = attach_name(dist.dispersao_geografica(
             con, ano=ano_filtro, advogado_id=adv_filtro, min_comarcas=min_com))
+        if not df.empty:
+            # Bar chart top 30 por nº de comarcas
+            top_disp = df.head(30).copy()
+            top_disp["label"] = (top_disp["nome"] if PRIVATE and "nome" in top_disp else top_disp["advogado_id"])
+            chart_disp = (
+                alt.Chart(top_disp)
+                .mark_bar(color="#2ca02c")
+                .encode(
+                    x=alt.X("n_comarcas:Q", title="Nº de comarcas distintas"),
+                    y=alt.Y("label:N", sort="-x", title=""),
+                    tooltip=[
+                        alt.Tooltip("label:N", title="Advogado"),
+                        alt.Tooltip("n_comarcas:Q", title="Comarcas"),
+                        alt.Tooltip("n_pagamentos:Q", title="Pgto"),
+                        alt.Tooltip("total:Q", title="R$ total", format=",.2f"),
+                    ],
+                )
+                .properties(height=min(500, 25 * len(top_disp)))
+            )
+            st.altair_chart(chart_disp, use_container_width=True)
         st.dataframe(
             df.rename(columns={
                 "advogado_id": "ADV", "nome": "Nome",
@@ -378,6 +469,34 @@ with tabs[2]:
         k = st.slider("Múltiplo da mediana (k)", 2.0, 10.0, 4.0, 0.5, key="picos_k")
         df = attach_name(dist.picos_intra_pessoa(
             con, ano=ano_filtro, advogado_id=adv_filtro, k=k))
+        if not df.empty:
+            # Scatter: mediana vs valor do mês com cor pela razão
+            scatter_pic = (
+                alt.Chart(df)
+                .mark_circle(opacity=0.7, size=70)
+                .encode(
+                    x=alt.X("mediana:Q", title="Mediana mensal do advogado (R$)",
+                            scale=alt.Scale(type="log")),
+                    y=alt.Y("valor_mes:Q", title="Valor no mês atípico (R$)",
+                            scale=alt.Scale(type="log")),
+                    color=alt.Color("razao:Q", title="Razão",
+                                    scale=alt.Scale(scheme="reds")),
+                    tooltip=[
+                        alt.Tooltip("nome:N" if PRIVATE else "advogado_id:N",
+                                    title="Advogado"),
+                        alt.Tooltip("competencia:T", title="Mês"),
+                        alt.Tooltip("mediana:Q", title="Mediana", format=",.2f"),
+                        alt.Tooltip("valor_mes:Q", title="Valor", format=",.2f"),
+                        alt.Tooltip("razao:Q", title="Razão", format=".1f"),
+                    ],
+                )
+                .properties(height=320)
+            )
+            st.altair_chart(scatter_pic, use_container_width=True)
+            st.caption(
+                "Cada bolinha é um pico. Eixos em log. Bolinhas mais escuras = "
+                "razão maior. Diagonal implícita = sem anomalia (valor = mediana)."
+            )
         st.dataframe(
             df.rename(columns={
                 "advogado_id": "ADV", "nome": "Nome",
@@ -390,6 +509,33 @@ with tabs[2]:
     with st.expander("📊 Crescimento yoy (ignora filtro de ano — precisa de série)"):
         fator = st.slider("Fator mínimo", 2.0, 20.0, 4.0, 0.5, key="yoy_k")
         df = attach_name(dist.crescimento_yoy(con, advogado_id=adv_filtro, fator=fator))
+        if not df.empty:
+            # Scatter v_prev x v_curr em log-log; linha y=x = sem crescimento
+            scatter_yoy = (
+                alt.Chart(df)
+                .mark_circle(opacity=0.7, size=80, color="#9467bd")
+                .encode(
+                    x=alt.X("v_prev:Q", title="Recebido no ano anterior (R$)",
+                            scale=alt.Scale(type="log")),
+                    y=alt.Y("v_curr:Q", title="Recebido no ano (R$)",
+                            scale=alt.Scale(type="log")),
+                    size=alt.Size("fator:Q", title="Fator", scale=alt.Scale(range=[40, 400])),
+                    tooltip=[
+                        alt.Tooltip("nome:N" if PRIVATE else "advogado_id:N",
+                                    title="Advogado"),
+                        alt.Tooltip("ano_curr:O", title="Ano"),
+                        alt.Tooltip("v_prev:Q", title="Anterior", format=",.2f"),
+                        alt.Tooltip("v_curr:Q", title="Atual", format=",.2f"),
+                        alt.Tooltip("fator:Q", title="Fator", format=".1f"),
+                    ],
+                )
+                .properties(height=320)
+            )
+            st.altair_chart(scatter_yoy, use_container_width=True)
+            st.caption(
+                "Bolinhas no canto superior esquerdo (em log) = crescimento "
+                "explosivo do ano anterior para o atual. Tamanho = fator."
+            )
         st.dataframe(
             df.rename(columns={
                 "advogado_id": "ADV", "nome": "Nome",
@@ -402,6 +548,29 @@ with tabs[2]:
     with st.expander("🏛️ Concentração por vara (% top-1)"):
         df = dist.concentracao_por_vara(con, ano=ano_filtro, advogado_id=adv_filtro)
         df = attach_name(df, id_col="top_advogado")
+        if not df.empty:
+            # Histograma do % top-1 por vara
+            hist_var = (
+                alt.Chart(df)
+                .mark_bar(color="#ff7f0e")
+                .encode(
+                    x=alt.X("pct_top:Q", bin=alt.Bin(maxbins=20),
+                            title="% que vai pro top-1 da vara",
+                            axis=alt.Axis(format=".0%")),
+                    y=alt.Y("count():Q", title="Nº de varas"),
+                    tooltip=[
+                        alt.Tooltip("pct_top:Q", bin=alt.Bin(maxbins=20),
+                                    title="Faixa", format=".0%"),
+                        "count():Q",
+                    ],
+                )
+                .properties(height=280)
+            )
+            st.altair_chart(hist_var, use_container_width=True)
+            st.caption(
+                "Quantas varas têm um advogado top-1 capturando que % do total. "
+                "Cauda à direita = varas onde 1 advogado domina."
+            )
         st.dataframe(
             df.rename(columns={
                 "comarca": "Comarca", "vara_nome": "Vara",
@@ -416,6 +585,30 @@ with tabs[2]:
 
     with st.expander("💰 Ticket atípico (> P95 da vara)"):
         df = attach_name(dist.ticket_atipico(con, ano=ano_filtro, advogado_id=adv_filtro))
+        if not df.empty:
+            scatter_tk = (
+                alt.Chart(df)
+                .mark_circle(opacity=0.7, size=80, color="#e377c2")
+                .encode(
+                    x=alt.X("p95_ticket:Q", title="P95 do ticket na vara (R$)"),
+                    y=alt.Y("ticket_adv:Q", title="Ticket do advogado (R$)"),
+                    size=alt.Size("n:Q", title="N pgto"),
+                    tooltip=[
+                        alt.Tooltip("nome:N" if PRIVATE else "advogado_id:N",
+                                    title="Advogado"),
+                        alt.Tooltip("vara_nome:N", title="Vara"),
+                        alt.Tooltip("ticket_adv:Q", title="Ticket adv", format=",.2f"),
+                        alt.Tooltip("p95_ticket:Q", title="P95 vara", format=",.2f"),
+                        alt.Tooltip("razao_p95:Q", title="Razão", format=".2f"),
+                    ],
+                )
+                .properties(height=320)
+            )
+            st.altair_chart(scatter_tk, use_container_width=True)
+            st.caption(
+                "Eixo Y > eixo X significa que o advogado cobra ticket acima do "
+                "P95 do tipo de vara. Bolinhas maiores = mais pagamentos."
+            )
         st.dataframe(
             df.rename(columns={
                 "advogado_id": "ADV", "nome": "Nome",
@@ -432,6 +625,24 @@ with tabs[2]:
         min_n = st.slider("Mín. pagamentos no mesmo processo", 3, 20, 5, key="rep_n")
         df = attach_name(dist.repetencia_processo(
             con, ano=ano_filtro, advogado_id=adv_filtro, min_pagamentos=min_n))
+        if not df.empty:
+            # Histograma do nº de pagamentos por processo
+            hist_rep = (
+                alt.Chart(df)
+                .mark_bar(color="#17becf")
+                .encode(
+                    x=alt.X("n_pagamentos:Q", bin=alt.Bin(maxbins=20),
+                            title="Nº de pagamentos no mesmo processo"),
+                    y=alt.Y("count():Q", title="Nº de processos (advogado × processo)"),
+                    tooltip=["count():Q"],
+                )
+                .properties(height=280)
+            )
+            st.altair_chart(hist_rep, use_container_width=True)
+            st.caption(
+                "Quantos processos tiveram N pagamentos pra mesmo advogado. "
+                "Parcelas legítimas são comuns; cauda muito longa merece atenção."
+            )
         st.dataframe(
             df.rename(columns={
                 "advogado_id": "ADV", "nome": "Nome",
