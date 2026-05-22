@@ -11,6 +11,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+from difflib import get_close_matches
+
 from . import anonymize as anon_mod
 from .ckan.run import collect as collect_ckan
 from .duckdb_loader import write_databases
@@ -21,6 +23,20 @@ from .transparencia.fetch import (
     is_data_xlsx,
 )
 from .transparencia.parse import Payment, parse_xlsx
+
+# Importa a lista de membros da comissão (e o normalize). Mantemos em
+# analysis/comissao.py por ser o módulo "verdadeiro" da comissão; o ETL
+# apenas materializa o resultado do matching.
+from analysis.comissao import COMISSAO_DEFAULT  # type: ignore
+
+
+CARGO_ORDEM = {
+    "Presidente": 1,
+    "Vice-Presidente": 2,
+    "Secretário Geral": 3,
+    "Secretária Adjunta": 4,
+    "Membro": 5,
+}
 
 ROOT = Path(__file__).resolve().parent.parent
 RAW_DIR = ROOT / "data" / "raw"
@@ -125,6 +141,35 @@ def run(build_full_db: bool = True, force_redownload: bool = False) -> int:
     ckan_payload = collect_ckan(RAW_DIR)
     print(f"[etl]   {len(ckan_payload['rows']):,} CKAN aggregate rows")
 
+    # Pré-computar ADV_ids da comissão (exato + fuzzy) — segue pra DB
+    # nos dois modos (anon e full). No anon revela só (ADV_xxx, cargo).
+    nome_to_id = {ident.nome_normalizado: ident.advogado_id
+                  for ident in identities.values()}
+    norm_list = list(nome_to_id.keys())
+    comissao_rows: list[tuple[str, str, int]] = []
+    nao_match: list[str] = []
+    for cargo, nome in COMISSAO_DEFAULT:
+        key = anon_mod.normalize_name(nome)
+        adv = nome_to_id.get(key)
+        if adv is None:
+            cand = get_close_matches(key, norm_list, n=1, cutoff=0.85)
+            if cand:
+                adv = nome_to_id[cand[0]]
+        if adv:
+            comissao_rows.append((adv, cargo, CARGO_ORDEM.get(cargo, 9)))
+        else:
+            nao_match.append(nome)
+    # Dedup: se 2 membros mapearem para o mesmo ADV (homônimos), mantém o
+    # de maior precedência (menor `ordem`)
+    seen: dict[str, tuple[str, int]] = {}
+    for adv, cargo, ordem in comissao_rows:
+        if adv not in seen or ordem < seen[adv][1]:
+            seen[adv] = (cargo, ordem)
+    comissao_rows = [(adv, c, o) for adv, (c, o) in seen.items()]
+    print(f"[etl] comissão: {len(comissao_rows)}/{len(COMISSAO_DEFAULT)} membros mapeados")
+    if nao_match:
+        print(f"[etl]   não encontrados: {nao_match}")
+
     print("[etl] === writing DuckDB ===")
     full = FULL_DB if build_full_db else None
     summary = write_databases(
@@ -134,6 +179,7 @@ def run(build_full_db: bool = True, force_redownload: bool = False) -> int:
         identities=identities,
         ckan_payload=ckan_payload,
         transparencia_sources=transparencia_sources,
+        comissao_rows=comissao_rows,
     )
     print(f"[etl] wrote: {summary}")
     return 0

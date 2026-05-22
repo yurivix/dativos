@@ -72,6 +72,12 @@ CREATE TABLE IF NOT EXISTS sources (
     imported_at        TIMESTAMP NOT NULL,
     PRIMARY KEY (source_kind, source_id)
 );
+
+CREATE TABLE IF NOT EXISTS comissao (
+    advogado_id        VARCHAR PRIMARY KEY,  -- referência à advogados.advogado_id
+    cargo              VARCHAR NOT NULL,
+    ordem              INTEGER NOT NULL      -- Presidente=1, Vice=2, etc.
+);
 """
 
 ADVOGADOS_FULL = """
@@ -111,8 +117,13 @@ def write_databases(
     identities: dict[str, AdvogadoIdentity],
     ckan_payload: dict,
     transparencia_sources: list[dict],
+    comissao_rows: list[tuple[str, str, int]] | None = None,
 ) -> dict:
-    """Replace both databases. `full_path=None` skips the full DB."""
+    """Replace both databases. `full_path=None` skips the full DB.
+
+    `comissao_rows` é lista de (advogado_id, cargo, ordem) — gravada na
+    tabela `comissao` em AMBOS os DBs (não revela nome no anon).
+    """
     now = _now()
     summary: dict = {}
 
@@ -218,6 +229,11 @@ def write_databases(
     if not sources_df.empty:
         sources_df["imported_at"] = pd.to_datetime(sources_df["imported_at"])
 
+    comissao_df = pd.DataFrame(
+        comissao_rows or [],
+        columns=["advogado_id", "cargo", "ordem"],
+    )
+
     for path, kind in targets:
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
@@ -241,6 +257,10 @@ def write_databases(
             if not sources_df.empty:
                 df_src = sources_df  # noqa: F841
                 con.execute("INSERT INTO sources SELECT * FROM df_src")
+
+            if not comissao_df.empty:
+                df_com = comissao_df  # noqa: F841
+                con.execute("INSERT INTO comissao SELECT * FROM df_com")
         finally:
             con.close()
         summary[kind] = str(path)

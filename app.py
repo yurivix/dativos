@@ -87,6 +87,17 @@ def load_advogados_index() -> pd.DataFrame:
     return get_conn().execute("SELECT advogado_id, n_cpfs_vistos FROM advogados").df()
 
 
+@st.cache_data(ttl=3600)
+def load_comissao_index() -> pd.DataFrame:
+    """ADV_ids da comissão (com cargo). Existe em ambos os DBs."""
+    try:
+        return get_conn().execute(
+            "SELECT advogado_id, cargo, ordem FROM comissao ORDER BY ordem"
+        ).df()
+    except Exception:
+        return pd.DataFrame(columns=["advogado_id", "cargo", "ordem"])
+
+
 def attach_name(df: pd.DataFrame, id_col: str = "advogado_id") -> pd.DataFrame:
     """Left-join the real name into a DataFrame, only if PRIVATE mode."""
     if not PRIVATE or df.empty:
@@ -271,23 +282,49 @@ with tabs[1]:
     if adv_filtro:
         titulo += f" (filtrado: {adv_label})"
     st.subheader(titulo)
-    top = dist.top_recebedores(con, ano=ano_filtro, advogado_id=adv_filtro, n=300)
+
+    # Comissão: usado para flag + filtro
+    comissao_idx = load_comissao_index()
+    cargo_by_id = dict(zip(comissao_idx["advogado_id"], comissao_idx["cargo"]))
+
+    so_comissao = st.checkbox(
+        f"Mostrar APENAS membros da comissão ({len(cargo_by_id)})",
+        value=False,
+        key="rank_so_com",
+    )
+
+    top = dist.top_recebedores(con, ano=ano_filtro, advogado_id=adv_filtro, n=500)
     top = attach_name(top)
-    cols = ["advogado_id"] + (["nome"] if PRIVATE else []) + [
+    top["cargo"] = top["advogado_id"].map(cargo_by_id).fillna("")
+
+    if so_comissao:
+        top = top[top["cargo"] != ""]
+
+    cols = ["cargo", "advogado_id"] + (["nome"] if PRIVATE else []) + [
         "n_pagamentos", "total_bruto", "ticket_medio", "n_processos", "n_comarcas"
     ]
     top = top[cols]
     rename = {
+        "cargo": "🏛️ Comissão",
         "advogado_id": "ADV", "nome": "Nome",
         "n_pagamentos": "Pagamentos", "total_bruto": "Total (R$)",
         "ticket_medio": "Ticket médio", "n_processos": "Processos",
         "n_comarcas": "Comarcas",
     }
-    st.dataframe(
-        top.rename(columns=rename).style.format(
-            {"Total (R$)": "{:,.2f}", "Ticket médio": "{:,.2f}"}
-        ),
-        use_container_width=True, hide_index=True, height=500,
+
+    def _highlight_comissao(row):
+        if row["🏛️ Comissão"]:
+            return ["background-color: #fff3cd; font-weight: 600"] * len(row)
+        return [""] * len(row)
+
+    styled = (top.rename(columns=rename)
+                 .style
+                 .format({"Total (R$)": "{:,.2f}", "Ticket médio": "{:,.2f}"})
+                 .apply(_highlight_comissao, axis=1))
+    st.dataframe(styled, use_container_width=True, hide_index=True, height=500)
+    st.caption(
+        f"🟨 Linhas destacadas = membros da Comissão de Dativos "
+        f"({len(cargo_by_id)} ADV_ids cadastrados)."
     )
     st.download_button(
         "⬇️ Baixar CSV",
