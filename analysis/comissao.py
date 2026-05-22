@@ -1,6 +1,6 @@
 """Comparativo de membros da Comissão de Dativos vs o restante da base.
 
-Lógica reaproveitada pela aba "🏛️ Comissão" do BIZÃO. Só faz sentido em modo
+Lógica reaproveitada pela aba "🏛️ Comissão" do app. Só faz sentido em modo
 privado (PRIVATE=True), porque o matching depende dos nomes reais.
 """
 from __future__ import annotations

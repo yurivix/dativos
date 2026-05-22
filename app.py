@@ -1,4 +1,4 @@
-"""BIZÃO público de Advogados Dativos do Espírito Santo.
+"""Análise de pagamentos a Advogados Dativos do Espírito Santo.
 
 Reads from `dativos_full.duckdb` if it exists locally (private mode, with names),
 else from `dativos_anon.duckdb` (public mode, ADV_xxx pseudonyms only).
@@ -41,7 +41,7 @@ DB_PATH = _resolve_db_path()
 DEFAULT_CUTOFF_YEAR = 2020  # implementação da Lista de Dativos
 
 st.set_page_config(
-    page_title="Dativos ES — BIZÃO",
+    page_title="Análise de pagamentos dativos — ES",
     page_icon="⚖️",
     layout="wide",
 )
@@ -115,7 +115,7 @@ def attach_name(df: pd.DataFrame, id_col: str = "advogado_id") -> pd.DataFrame:
 
 
 # ───── HEADER ────────────────────────────────────────────────────────────
-st.title("⚖️ Dativos ES — BIZÃO")
+st.title("⚖️ Análise de pagamentos dativos — Espírito Santo")
 st.caption(
     f"Modo: **{APP_MODE}** · Honorários a Advogados Dativos do Espírito Santo · "
     "[transparencia.es.gov.br](https://transparencia.es.gov.br/Comum/AdvogadosDativos)"
@@ -1550,7 +1550,7 @@ with tabs[9]:
 # ===== SOBRE =============================================================
 with tabs[10]:
     st.markdown(f"""
-### Como este BIZÃO foi feito
+### Como este sistema foi feito
 
 **Modo**: `{APP_MODE}` · **Banco**: `{DB_PATH.name}`
 

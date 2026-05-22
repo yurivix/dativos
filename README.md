@@ -1,6 +1,6 @@
 # dativos
 
-BIZÃO de transparência sobre **honorários pagos a advogados dativos pelo Estado do Espírito Santo**.
+Análise de transparência sobre **pagamentos a advogados dativos pelo Estado do Espírito Santo**.
 
 Consolida ~247 mil pagamentos individuais (2018–presente, R$ ~110 milhões) publicados pelo Portal da Transparência do ES e oferece análises de concentração, distorções e dispersão geográfica num dashboard interativo.
 
@@ -27,10 +27,10 @@ pip install -r requirements.txt
 # 2. Rodar ETL (gera AMBOS os bancos: anonimizado + com nomes)
 python -m etl
 
-# 3. BIZÃO público (anonimizado)
+# 3. App público (anonimizado)
 streamlit run app.py
 
-# 4. BIZÃO privado (com nomes reais, só local)
+# 4. App privado (com nomes reais, só local)
 streamlit run app_private.py
 ```
 
@@ -50,7 +50,7 @@ DATIVOS_NO_FULL_DB=1 python -m etl
 
 ```
 dativos/
-├── app.py                          # BIZÃO público (lê dativos_anon.duckdb)
+├── app.py                          # App público (lê dativos_anon.duckdb)
 ├── app_private.py                  # wrapper para versão local (lê dativos_full.duckdb)
 ├── etl/
 │   ├── transparencia/              # fonte primária (transparencia.es.gov.br)
