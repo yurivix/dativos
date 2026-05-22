@@ -1191,7 +1191,7 @@ with tabs[8]:
                     "Com. mediana": "{:,.2f}", "Com. média": "{:,.2f}",
                     "Demais mediana": "{:,.2f}", "Demais média": "{:,.2f}",
                     "Razão med": "{:.2f}×",
-                }).applymap(_highlight, subset=["Razão med"]),
+                }).map(_highlight, subset=["Razão med"]),
                 use_container_width=True, hide_index=True,
             )
             st.caption("🔴 Razão ≥ 3× | 🟠 Razão ≥ 2× — sinais a investigar.")
@@ -1493,7 +1493,7 @@ with tabs[8]:
                 "Total (R$)": "{:,.2f}",
                 "Percentil": "{:.2%}",
                 "Z (log) — |Z|>2 anomalia": "{:+.2f}",
-            }).applymap(_hi, subset=["Percentil"]),
+            }).map(_hi, subset=["Percentil"]),
             use_container_width=True, hide_index=True, height=520,
         )
 
